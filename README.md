@@ -1,4 +1,4 @@
-# lftcli
+# lofter-cli / lftcli
 
 一个 LOFTER 终端客户端。
 
