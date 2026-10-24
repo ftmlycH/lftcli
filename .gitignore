@@ -1,8 +1,14 @@
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 dist/
+build/
 packaging/wheels/
 *.egg-info/
+.env
+*.so
