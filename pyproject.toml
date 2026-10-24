@@ -7,12 +7,12 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
-lftcli = "main:main"
-lofter = "main:main"
+lftcli = "lftcli.main:main"
+lofter = "lftcli.main:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["main", "client", "parser", "output", "config"]
+[tool.setuptools.packages.find]
+where = ["src"]

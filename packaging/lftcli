@@ -5,8 +5,8 @@ if sys.version_info < (3, 10):
     sys.stderr.write("错误：需要 Python 3.10 或更高版本。当前是 %s。\n" % sys.version.split()[0])
     raise SystemExit(1)
 
-sys.path[:0] = ["/usr/share/lftcli", "/usr/share/lftcli/vendor"]
+sys.path.insert(0, "/usr/share")
 
-from main import main
+from lftcli.main import main
 
 raise SystemExit(main())

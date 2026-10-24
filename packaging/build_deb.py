@@ -18,7 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.1.0"
 PACKAGE = "lftcli"
-MODULES = ("main.py", "client.py", "parser.py", "output.py", "config.py")
+SOURCE = ROOT / "src" / "lftcli"
+MODULES = ("__init__.py", "__main__.py", "main.py", "client.py", "parser.py", "output.py", "config.py")
 SHARE = Path("usr/share/lftcli")
 BIN = Path("usr/bin/lftcli")
 DOC = Path("usr/share/doc/lftcli")
@@ -80,7 +81,7 @@ def installed_files() -> list[tuple[str, bytes, int]]:
     wrapper = (ROOT / "packaging" / "lftcli").read_bytes().replace(b"\r\n", b"\n")
     files.append((BIN.as_posix(), wrapper, 0o755))
     for name in MODULES:
-        files.append(((SHARE / name).as_posix(), (ROOT / name).read_bytes().replace(b"\r\n", b"\n"), 0o644))
+        files.append(((SHARE / name).as_posix(), (SOURCE / name).read_bytes().replace(b"\r\n", b"\n"), 0o644))
     files.append(((DOC / "README.md").as_posix(), (ROOT / "README.md").read_bytes().replace(b"\r\n", b"\n"), 0o644))
     files.append(((DOC / "copyright").as_posix(), (ROOT / "debian" / "copyright").read_bytes().replace(b"\r\n", b"\n"), 0o644))
     return files

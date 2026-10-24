@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-import config
+from . import config
 
 # --- 易变常量。接口失效时只改这一段。 ---
 PRODUCT = "lofter-android-7.6.12"
@@ -30,7 +30,12 @@ URL_BLOG = "https://api.lofter.com/v2.0/blogHomePage.api"
 URL_LIKES = "https://www.lofter.com/dwr/call/plaincall/MobilePostBean.getFavTrackItem.dwr"
 URL_FOLLOWING = "https://www.lofter.com/dwr/call/plaincall/UserBean.getUserFollowingList.dwr"
 URL_EXPLORE = "https://api.lofter.com/recommend/exploreRecom.json"
-FALLBACK_HOT_TAGS = ("原创小说", "原创", "无CP", "短篇", "小说", "完结","mujica","初祥","tksy","海喵","东方project","八意永琳","东方","mygo","海铃立希","明日方舟","少女前线","原神","永远的7日之都","三角初华","三角初音")
+FALLBACK_HOT_TAGS = (
+    "原创小说", "原创", "无CP", "短篇", "小说", "完结",
+    "mujica", "初祥", "tksy", "海喵", "东方project", "八意永琳", "东方",
+    "mygo", "海铃立希", "明日方舟", "少女前线", "原神", "永远的7日之都",
+    "三角初华", "三角初音",
+)
 TAG_PAGE_SIZE = 12
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
@@ -331,38 +336,20 @@ class LofterClient:
 
     def get_likes(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
-        kept: list[Post] = []
-        seen: set[str] = set()
-        cursor = 0
-        target = offset + limit
-        for _ in range(40):
-            if len(kept) >= target:
-                break
-            size = min(20, max((target - len(kept)) * 2, 5))
-            text = self._request_text(
-                "POST",
+
+        def fetch(cursor: int, kept: int, target: int) -> list[Post]:
+            size = min(20, max((target - kept) * 2, 5))
+            text = self._dwr(
                 URL_LIKES,
-                content=_dwr_body("MobilePostBean", "getFavTrackItem", [f"number:{size}", f"number:{cursor}"]).encode("utf-8"),
-                headers={"Content-Type": "text/plain", "Referer": "https://www.lofter.com/like"},
+                "MobilePostBean",
+                "getFavTrackItem",
+                [f"number:{size}", f"number:{cursor}"],
+                "https://www.lofter.com/like",
+                "喜欢列表暂时不可用，请稍后再试。",
             )
-            if "Exception" in text or "allowScriptTagRemoting" in text:
-                raise ApiError("喜欢列表暂时不可用，请稍后再试。")
-            batch = _parse_fav_posts(text)
-            if not batch:
-                break
-            fresh = 0
-            for post in batch:
-                if post.post_id in seen:
-                    continue
-                seen.add(post.post_id)
-                fresh += 1
-                if post.post_type != NOVEL_TYPE:
-                    continue
-                kept.append(post)
-            if fresh == 0:
-                break
-            cursor += len(batch)
-        return kept[offset : offset + limit]
+            return _parse_fav_posts(text)
+
+        return _collect(fetch, lambda post: post.post_id, lambda post: post.post_type == NOVEL_TYPE, limit, offset)
 
     def get_my_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         return self.get_blog_posts(self._blog_domain(), limit, offset)
@@ -402,53 +389,20 @@ class LofterClient:
 
     def get_following(self, limit: int = 20, offset: int = 0) -> list[Blog]:
         _check_window(limit, offset)
-        kept: list[Blog] = []
-        seen: set[str] = set()
-        cursor = 0
-        target = offset + limit
-        for _ in range(40):
-            if len(kept) >= target:
-                break
-            body = "\n".join(
-                [
-                    "callCount=1",
-                    "scriptSessionId=${scriptSessionId}187",
-                    "httpSessionId=",
-                    "c0-scriptName=UserBean",
-                    "c0-methodName=getUserFollowingList",
-                    "c0-id=0",
-                    f"c0-param0=number:{min(50, target - len(kept) or 1)}",
-                    f"c0-param1=number:{cursor}",
-                    "batchId=1",
-                ]
-            )
-            text = self._request_text(
-                "POST",
+
+        def fetch(cursor: int, kept: int, target: int) -> list[Blog]:
+            size = min(50, target - kept or 1)
+            text = self._dwr(
                 URL_FOLLOWING,
-                content=body.encode("utf-8"),
-                headers={
-                    "Content-Type": "text/plain",
-                    "Referer": "https://www.lofter.com/follow",
-                },
+                "UserBean",
+                "getUserFollowingList",
+                [f"number:{size}", f"number:{cursor}"],
+                "https://www.lofter.com/follow",
+                "关注列表暂时不可用，请稍后再试。",
             )
-            if "Exception" in text or "allowScriptTagRemoting" in text:
-                raise ApiError("关注列表暂时不可用，请稍后再试。")
-            batch = _parse_following(text)
-            if not batch:
-                break
-            fresh = 0
-            for blog in batch:
-                if blog.blog_id in seen:
-                    continue
-                seen.add(blog.blog_id)
-                kept.append(blog)
-                fresh += 1
-            if fresh == 0:
-                break
-            cursor += len(batch)
-            if len(batch) < 1:
-                break
-        return kept[offset : offset + limit]
+            return _parse_following(text)
+
+        return _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
 
     def recommend(self, count: int) -> list[Post]:
         if count < 1 or count > 15:
@@ -583,10 +537,25 @@ class LofterClient:
                 now = time.monotonic()
         self._last_request = now
 
+    def _dwr(self, url: str, script: str, method: str, params: list[str], referer: str, failure: str) -> str:
+        text = self._request_text(
+            "POST",
+            url,
+            content=_dwr_body(script, method, params).encode("utf-8"),
+            headers={"Content-Type": "text/plain", "Referer": referer},
+        )
+        if "Exception" in text or "allowScriptTagRemoting" in text:
+            raise ApiError(failure)
+        return text
+
+
+def _run(cookie: str, method: str, /, *args, **kwargs):
+    with LofterClient(cookie) as api:
+        return getattr(api, method)(*args, **kwargs)
+
 
 def get_collections(cookie: str, limit: int = 50, offset: int = 0) -> list[Collection]:
-    with LofterClient(cookie) as client:
-        return client.get_collections(limit, offset)
+    return _run(cookie, "get_collections", limit, offset)
 
 
 def get_collection_posts(
@@ -596,54 +565,39 @@ def get_collection_posts(
     offset: int = 0,
     order: str = "old",
 ) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.get_collection_posts(collection_id, limit, offset, order)
+    return _run(cookie, "get_collection_posts", collection_id, limit, offset, order)
 
 
-def search_tag(
-    cookie: str,
-    tag: str,
-    sort: str = "hot",
-    limit: int = 20,
-    offset: int = 0,
-) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.search_tag(tag, sort, limit, offset)
+def search_tag(cookie: str, tag: str, sort: str = "hot", limit: int = 20, offset: int = 0) -> list[Post]:
+    return _run(cookie, "search_tag", tag, sort, limit, offset)
 
 
 def get_post(cookie: str, post_id_or_url: str) -> Post:
-    with LofterClient(cookie) as client:
-        return client.get_post(post_id_or_url)
+    return _run(cookie, "get_post", post_id_or_url)
 
 
 def get_history(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.get_history(limit, offset)
+    return _run(cookie, "get_history", limit, offset)
 
 
 def get_likes(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.get_likes(limit, offset)
+    return _run(cookie, "get_likes", limit, offset)
 
 
 def get_my_posts(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.get_my_posts(limit, offset)
+    return _run(cookie, "get_my_posts", limit, offset)
 
 
 def get_blog_posts(cookie: str, blog: str, limit: int = 20, offset: int = 0) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.get_blog_posts(blog, limit, offset)
+    return _run(cookie, "get_blog_posts", blog, limit, offset)
 
 
 def get_following(cookie: str, limit: int = 20, offset: int = 0) -> list[Blog]:
-    with LofterClient(cookie) as client:
-        return client.get_following(limit, offset)
+    return _run(cookie, "get_following", limit, offset)
 
 
 def recommend(cookie: str, count: int) -> list[Post]:
-    with LofterClient(cookie) as client:
-        return client.recommend(count)
+    return _run(cookie, "recommend", count)
 
 
 def select_recommend_tags(count: int, liked, hot, rng) -> list[str]:
@@ -716,6 +670,32 @@ def _urllib_send(request: HTTPRequest) -> HTTPResponse:
             return HTTPResponse(response.status, response.read())
     except urllib.error.HTTPError as exc:
         return HTTPResponse(exc.code, exc.read())
+
+
+def _collect(fetch, key, keep, limit: int, offset: int):
+    kept = []
+    seen: set[str] = set()
+    cursor = 0
+    target = offset + limit
+    for _ in range(40):
+        if len(kept) >= target:
+            break
+        batch = fetch(cursor, len(kept), target)
+        if not batch:
+            break
+        fresh = 0
+        for item in batch:
+            ident = key(item)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            fresh += 1
+            if keep(item):
+                kept.append(item)
+        if fresh == 0:
+            break
+        cursor += len(batch)
+    return kept[offset : offset + limit]
 
 
 def _dwr_body(script: str, method: str, params: list[str]) -> str:
@@ -1146,14 +1126,6 @@ def _expect_response(payload: dict) -> dict:
     if isinstance(data, dict):
         return data
     raise ApiError("接口没有 response 字段，请只更新 client.py。")
-
-
-def _first_list(data: dict, keys: tuple[str, ...]) -> list:
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, list):
-            return value
-    raise ApiError("喜欢列表的返回结构和预期不一致，请只更新 client.py 里的 LIKES_METHOD。")
 
 
 def _post_count(collection) -> int | None:

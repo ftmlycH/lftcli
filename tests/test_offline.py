@@ -13,13 +13,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import client
-import config
-import main
-import output
-from parser import html_to_markdown, html_to_text
+from lftcli import client, config, main, output
+from lftcli.parser import html_to_markdown, html_to_text
 
 
 def _item(post_id=10, blog_id=20, title="标题一", hot=3200, author="作者A", content="<p>正文</p>"):
@@ -84,7 +81,9 @@ class ParserTests(unittest.TestCase):
         data = _tar_names(members["data.tar.gz"])
         self.assertIn("./control", control)
         self.assertIn("./usr/bin/lftcli", data)
+        self.assertIn("./usr/share/lftcli/__init__.py", data)
         self.assertIn("./usr/share/lftcli/main.py", data)
+        self.assertIn("from lftcli.main import main", _tar_text(members["data.tar.gz"], "./usr/bin/lftcli"))
         control_text = _tar_text(members["control.tar.gz"], "./control")
         self.assertIn("Package: lftcli", control_text)
         self.assertIn("Depends: python3\n", control_text)

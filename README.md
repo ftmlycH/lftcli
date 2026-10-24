@@ -2,10 +2,6 @@
 
 一个 LOFTER 终端客户端。
 
-在终端里读 LOFTER 的纯文本。一条命令只做一件事：打出一行列表，或打出一篇排好的文章。
-
-LOFTER 没有公开稳定的官方 API。这里用的是客户端里已经公开、可观察的接口，随时可能失效。所有 URL、参数和请求头都在 `client.py` 顶部，失效时只改那一个文件。
-
 ## 下载
 
 源码：<https://github.com/ftmlycH/lftcli>
@@ -15,7 +11,7 @@ git clone https://github.com/ftmlycH/lftcli.git
 cd lftcli
 ```
 
-需要 Python 3.10 或更高版本，没有第三方库。装好后执行 `lftcli` 进入 `lofter>`。如果命令还没进 PATH，在项目目录里运行 `python3 main.py`，效果相同。
+需要 Python 3.10 或更高版本，没有第三方库。程序在 `src/lftcli`。装好后执行 `lftcli` 进入 `lofter>`。还没装进环境时，在项目目录运行 `python3 main.py`，效果相同。
 
 ## 各系统安装
 
@@ -93,7 +89,7 @@ NetBSD：
 pkgin install python312
 cd lftcli
 python3.12 -m pip install -e .
-python3.12 main.py
+python3.12 -m lftcli
 ```
 
 BSD 不使用前面的 `.deb`。配置文件同样是 `~/.lofter-cli/config.json`。
@@ -158,7 +154,7 @@ clear
 | `mine` | 我发布的文字 |
 | `following` | 我关注的人。看到名字后用 `blog 名字` 看对方的文字 |
 | `blog` | 某个博客发布的文字 |
-| `likes` | 我喜欢的文章。平台这个接口经常失败，失败时会说明原因 |
+| `likes` | 我喜欢的文章 |
 | `history` | 账号里浏览过的文章 |
 | `tag` | 标签检索。`hot` 是总热度，`new` 是最新，`month` 是月榜 |
 | `recommend 篇数` | 每个选中的标签随机一篇。先用喜欢的标签，不够再用热门标签 |
@@ -199,7 +195,7 @@ Windows 的传统控制台会打开 ANSI 显示，中文和分隔线才能正常
 
 ## 请求约束
 
-这些都封在 `client.py` 里：
+这些都封在 `src/lftcli/client.py` 里：
 
 - 超时 15 秒。
 - 相邻请求至少间隔 0.3 秒。
@@ -211,8 +207,8 @@ Windows 的传统控制台会打开 ANSI 显示，中文和分隔线才能正常
 
 ## 已知局限
 
-- 接口不是官方的。失效时更新 `client.py` 顶部的地址和参数，命令和输出不用改。
+- 接口不是官方的。失效时更新 `src/lftcli/client.py` 顶部的地址和参数，命令和输出不用改。
 - 订阅、喜欢、浏览记录需要有效登录 Cookie。付费或仅自己可见的正文，可能拿不到全文。
 - 热度排序受平台过滤影响，不保证严格按数字递减。
 - 不支持图片。纯文本模式下图片会被去掉；没有文字时会提示这篇没有可阅读的正文。
-- 「我的喜欢」走网页收藏接口。如果返回结构变了，只改 `client.py`。
+- 「我的喜欢」走网页收藏接口。如果返回结构变了，只改 `src/lftcli/client.py`。
