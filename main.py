@@ -74,7 +74,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cookie_actions.add_parser("check", help="用当前生效的 Cookie 确认登录").set_defaults(func=_cookie_check)
     cookie_actions.add_parser("clear", help="删除配置文件里的 Cookie").set_defaults(func=_cookie_clear)
 
-    for name in ("clear", "cls", "清空"):
+    for name in ("clear", "cls"):
         screen = commands.add_parser(name, help="清空屏幕")
         screen.set_defaults(func=_clear_screen)
 
@@ -128,10 +128,9 @@ def _build_parser() -> argparse.ArgumentParser:
     random_cmd.add_argument("--offset", type=int, default=0, help="从标签结果的第几条之后开始建候选池")
     random_cmd.set_defaults(func=_random)
 
-    for name in ("recommend", "推荐"):
-        recommend_cmd = commands.add_parser(name, help="从喜欢的标签和热门标签里随机推荐几篇")
-        recommend_cmd.add_argument("count", type=int, help="想看几篇，1 到 15")
-        recommend_cmd.set_defaults(func=_recommend)
+    recommend_cmd = commands.add_parser("recommend", help="从喜欢的标签和热门标签里随机推荐几篇")
+    recommend_cmd.add_argument("count", type=int, help="想看几篇，1 到 15")
+    recommend_cmd.set_defaults(func=_recommend)
 
     post = commands.add_parser("post", help="读一篇文章的纯文本")
     post.add_argument("post_id_or_url", help="列表里的数字 ID，或文章链接")
@@ -146,7 +145,7 @@ def _add_page_args(parser: argparse.ArgumentParser, limit: int) -> None:
 
 
 def repl() -> int:
-    output.print_info("只列出文字小说。clear 清空屏幕，help 查看指令，exit 退出。")
+    output.print_info("lofter-cli help 查看指令，exit 退出。")
     while True:
         try:
             line = input("lofter> ")
@@ -180,7 +179,7 @@ def _clear_screen(_args, _cookie: str) -> None:
 
 
 def _needs_cookie(args) -> bool:
-    if getattr(args, "command", None) in {None, "clear", "cls", "清空"}:
+    if getattr(args, "command", None) in {None, "clear", "cls"}:
         return False
     if args.command != "cookie":
         return True
