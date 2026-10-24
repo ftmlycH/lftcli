@@ -1,0 +1,18 @@
+[project]
+name = "lofter-cli"
+version = "0.1.0"
+description = "Terminal reader for LOFTER text posts"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+lftcli = "main:main"
+lofter = "main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main", "client", "parser", "output", "config"]

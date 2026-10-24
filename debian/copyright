@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: lftcli
+
+Files: *
+Copyright: 2026 lftcli authors
+License: LicenseRef-unspecified
+ The project has not declared a license. Install and redistribute it only
+ with permission of the copyright holder.

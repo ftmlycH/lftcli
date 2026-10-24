@@ -1,0 +1,14 @@
+Source: lftcli
+Section: utils
+Priority: optional
+Maintainer: lftcli <lftcli@localhost>
+Build-Depends: python3
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: lftcli
+Architecture: all
+Depends: python3
+Description: Read LOFTER novels in the terminal
+ Interactive commands for subscribed collections, tags, and plain-text posts.
+ Image and video posts are omitted. This is an unofficial client.

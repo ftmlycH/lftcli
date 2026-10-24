@@ -1,0 +1,5 @@
+lftcli (0.1.0) unstable; urgency=medium
+
+  * Package the terminal LOFTER reader.
+
+ -- lftcli <lftcli@localhost>  Sat, 24 Oct 2026 18:50:00 +0800
