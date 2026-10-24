@@ -1,3 +1,6 @@
+##lofter-cli/lftcli
+
+一个LOFTER的终端CLI客户端。
 
 ## 安装
 
