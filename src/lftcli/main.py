@@ -1,4 +1,4 @@
-"""LOFTER 终端入口。只解析命令，再调用客户端、解析器和输出。"""
+"""命令入口。"""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def _paged(fetch, show):
 
 
 def repl() -> int:
-    output.print_info("lofter-cli help 查看指令，exit 退出。")
+    output.print_info("help 查看指令，exit 退出。")
     while True:
         try:
             line = input("lofter> ")

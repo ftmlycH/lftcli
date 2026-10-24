@@ -1,4 +1,4 @@
-"""把文章 HTML 转成纯文本。这里不做任何网络请求，也不依赖第三方库。"""
+"""把文章 HTML 转成纯文本。"""
 
 from __future__ import annotations
 
@@ -9,12 +9,10 @@ _BLOCK_TAGS = {"p", "div", "li", "blockquote", "section", "article", "tr", "h1",
 
 
 def html_to_text(html: str) -> str:
-    """去掉 script/style，把 <br> 和 </p> 变成换行，合并连续空行，去掉首尾空白。"""
     return _render(html, markdown=False)
 
 
 def html_to_markdown(html: str) -> str:
-    """可选的轻量 Markdown。图片同样忽略。"""
     return _render(html, markdown=True)
 
 

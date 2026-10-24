@@ -1,9 +1,5 @@
 #!/usr/bin/python3
-"""Install the bundled .deb without apt.
-
-Usage, from the directory that contains the package:
-    sudo python3 install_deb.py lftcli_0.1.0_all.deb
-"""
+"""Install a .deb by extracting it. Does not use apt."""
 
 from __future__ import annotations
 

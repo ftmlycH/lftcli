@@ -1,7 +1,4 @@
-"""读取和保存 Cookie，并记住列表里见过的文章 ID。
-
-本地索引只为了让 `lofter post 123` 能对上博客 ID，不包含业务请求。
-"""
+"""本机 Cookie，以及数字文章 ID 对应的博客 ID。"""
 
 from __future__ import annotations
 
@@ -18,7 +15,7 @@ _COOKIE_MAX = 16384
 
 
 class ConfigError(RuntimeError):
-    """Cookie 没配好，或配置文件读不了。"""
+    """配置缺失或无法读取。"""
 
 
 def load_cookie() -> str | None:
@@ -71,7 +68,6 @@ def clear_cookie() -> bool:
 
 
 def cookie_status_lines() -> list[str]:
-    """描述 Cookie 存在与否。不包含 Cookie 内容。"""
     lines = [f"配置文件：{CONFIG_PATH}"]
     try:
         saved = load_saved_cookie()

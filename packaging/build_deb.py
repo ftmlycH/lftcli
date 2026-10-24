@@ -1,9 +1,4 @@
-"""Build an architecture-independent .deb without dpkg.
-
-Usage:
-    python packaging/build_deb.py
-    python packaging/build_deb.py --root debian/lftcli
-"""
+"""Build an architecture-independent .deb without dpkg."""
 
 from __future__ import annotations
 

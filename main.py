@@ -1,4 +1,4 @@
-"""未安装时的入口。安装后直接运行 lftcli，或 python -m lftcli。"""
+"""未安装时的入口。"""
 
 import sys
 from pathlib import Path

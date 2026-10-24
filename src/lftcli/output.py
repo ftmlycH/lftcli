@@ -1,4 +1,4 @@
-"""终端输出。只打印已经整理好的对象，不抓异常，也不访问网络。"""
+"""终端输出。不访问网络。"""
 
 from __future__ import annotations
 
@@ -62,7 +62,6 @@ def print_article(post) -> None:
 
 
 def clear_screen() -> None:
-    """清空当前终端。Windows 用 cls，Linux / macOS 用 clear，新终端用 ANSI。"""
     if not _is_tty(sys.stdout):
         return
     if _ansi_clear_works():
@@ -74,7 +73,6 @@ def clear_screen() -> None:
 
 
 def prepare_terminal() -> None:
-    """让 Windows 传统控制台能显示中文和制表符，并在 Linux 上启用行编辑。"""
     if os.name == "nt":
         _enable_windows_vt()
         return

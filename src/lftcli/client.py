@@ -1,7 +1,4 @@
-"""LOFTER 网络层。URL、参数、请求头和重试只放在这个文件里。
-
-这些接口来自公开客户端的抓包，不是官方稳定 API，失效时只改本文件。
-"""
+"""LOFTER 网络层。地址、参数和请求头只改这个文件。"""
 
 from __future__ import annotations
 
@@ -17,7 +14,6 @@ from dataclasses import dataclass
 
 from . import config
 
-# --- 易变常量。接口失效时只改这一段。 ---
 PRODUCT = "lofter-android-7.6.12"
 USER_AGENT = "LOFTER-Android 7.6.12 (V2272A; Android 13; null) WIFI"
 URL_TAG_POSTS = "https://api.lofter.com/oldapi/tagPosts.api"
@@ -59,7 +55,7 @@ class AuthError(RuntimeError):
 
 
 class ApiError(RuntimeError):
-    """接口失败，但不是登录问题。"""
+    """接口失败。"""
 
 
 @dataclass
@@ -222,7 +218,6 @@ class LofterClient:
         found: list[Post] = []
         seen: set[str] = set()
         cursor = 0
-        # 当前标签接口按 offset 翻页。before 记下本页最早发布时间，用来发现游标没有前进。
         before: int | None = None
         for _ in range(max_pages):
             if len(found) >= need:
@@ -269,7 +264,7 @@ class LofterClient:
                     raise ApiError("文章数据结构异常，请只更新 client.py。")
                 break
             if oldest is not None and before is not None and oldest >= before and api_sort == "new":
-                # 最新排序应往更早走。时间不再变早，就停，避免空转。
+                # 最新排序的时间不再变早，且游标不前进时停，避免空转。
                 next_cursor = _as_int(data.get("offset"))
                 if next_cursor is None or next_cursor <= cursor:
                     break
@@ -911,7 +906,6 @@ def _take_pages(fetch, limit: int, offset: int, page_cap: int = 50) -> list:
 
 
 def _take_novels(fetch, limit: int, skip: int, page_cap: int = 50) -> list:
-    """从第一页往后翻，只保留文字小说，跳过图片和视频。"""
     kept: list = []
     seen: set[str] = set()
     cursor = 0

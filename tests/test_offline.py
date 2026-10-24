@@ -1,5 +1,3 @@
-"""不访问 LOFTER 的检查：解析、命令入口、以及用假响应验证 client。"""
-
 from __future__ import annotations
 
 import builtins
