@@ -33,17 +33,18 @@ FALLBACK_HOT_TAGS = (
     "mygo", "海铃立希", "明日方舟", "少女前线", "原神", "永远的7日之都",
     "三角初华", "三角初音",
 )
-TAG_PAGE_SIZE = 12
+TAG_PAGE_SIZE = 20
 MAX_PICKS = 5
 # 随机池略大于篇数；推荐按缺口补，够了就停。
-FILL_PAGES = 16
+FILL_PAGES = 8
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
 
-TIMEOUT_SECONDS = 15.0
-MIN_INTERVAL_SECONDS = 0.3
+TIMEOUT_SECONDS = 12.0
+MIN_INTERVAL_SECONDS = 0.1
 MAX_ATTEMPTS = 3
+PAGE_CAP = 40
 RETRY_HTTP = {429, 500, 502, 503, 504}
 AUTH_MESSAGE = "Cookie 已失效，请重新从浏览器复制 LOFTER-PHONE-LOGIN-AUTH 或 LOFTER_SESS。"
 _POST_URL = re.compile(
@@ -202,14 +203,14 @@ class LofterClient:
                 raise ApiError("合集文章的返回结构和预期不一致，请只更新 client.py。")
             return rows, _as_int(data.get("offset")), _post_count(data.get("collection"))
 
-        rows = _take_novels(fetch, limit, offset, page_cap=15)
+        rows = _take_novels(fetch, limit, offset, page_cap=PAGE_CAP)
         return _map_rows(
             rows,
             lambda row: _to_post(row, with_html=False),
             "合集文章的返回结构和预期不一致，请只更新 client.py。",
         )
 
-    def search_tag(self, tag: str, sort: str = "hot", limit: int = 20, offset: int = 0, max_pages: int = 40) -> list[Post]:
+    def search_tag(self, tag: str, sort: str = "hot", limit: int = 20, offset: int = 0, max_pages: int = 20) -> list[Post]:
         _check_window(limit, offset, ceiling=300)
         name = tag.strip()
         if not name:
@@ -327,7 +328,7 @@ class LofterClient:
             return rows, _as_int(data.get("offset")), _as_int(data.get("count"))
 
         posts = _map_rows(
-            _take_novels(fetch, limit, offset),
+            _take_novels(fetch, limit, offset, page_cap=PAGE_CAP),
             lambda row: _to_post(row, with_html=False),
             "浏览记录的返回结构和预期不一致，请只更新 client.py。",
         )
@@ -337,7 +338,7 @@ class LofterClient:
         _check_window(limit, offset)
 
         def fetch(cursor: int, kept: int, target: int) -> list[Post]:
-            size = min(20, max((target - kept) * 2, 5))
+            size = min(40, max((target - kept) * 2, 10))
             text = self._dwr(
                 URL_LIKES,
                 "MobilePostBean",
@@ -381,7 +382,7 @@ class LofterClient:
             return rows, _as_int(data.get("offset")), None
 
         return _map_rows(
-            _take_novels(fetch, limit, offset),
+            _take_novels(fetch, limit, offset, page_cap=max(limit + offset, 10)),
             lambda row: _to_post(row, with_html=False),
             "博客文章的返回结构和预期不一致，请只更新 client.py。",
         )
@@ -390,7 +391,7 @@ class LofterClient:
         _check_window(limit, offset)
 
         def fetch(cursor: int, kept: int, target: int) -> list[Blog]:
-            size = min(50, target - kept or 1)
+            size = min(50, max(target - kept, 1))
             text = self._dwr(
                 URL_FOLLOWING,
                 "UserBean",
@@ -405,12 +406,18 @@ class LofterClient:
 
     def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
-        blogs = self.get_following(limit=min(100, max(limit + offset, 20)), offset=0)
+        need = offset + limit
+        # 每人多取几篇，少打几次博客接口。
+        blog_limit = min(30, max(need, 8))
+        blogs = self.get_following(limit=blog_limit, offset=0)
         found: list[Post] = []
         seen: set[str] = set()
+        per_blog = min(8, max(need, 4))
         for blog in blogs:
+            if len(found) >= need:
+                break
             try:
-                batch = self.get_blog_posts(blog.name, limit=3, offset=0)
+                batch = self.get_blog_posts(blog.name, limit=per_blog, offset=0)
             except ApiError:
                 continue
             for post in batch:
@@ -418,8 +425,8 @@ class LofterClient:
                     continue
                 seen.add(post.post_id)
                 found.append(post)
-            if len(found) >= offset + limit:
-                break
+                if len(found) >= need:
+                    break
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
@@ -448,7 +455,7 @@ class LofterClient:
                         sort="hot",
                         limit=min(need + 2, TAG_PAGE_SIZE),
                         offset=0,
-                        max_pages=3,
+                        max_pages=2,
                     )
                 except ApiError:
                     continue
@@ -714,6 +721,9 @@ def _header_has_controls(value: str) -> bool:
     return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
+_OPENER = urllib.request.build_opener()
+
+
 def _urllib_send(request: HTTPRequest) -> HTTPResponse:
     headers = dict(request.headers)
     payload = request.content
@@ -722,7 +732,7 @@ def _urllib_send(request: HTTPRequest) -> HTTPResponse:
         headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
     outgoing = urllib.request.Request(request.url.full, data=payload, headers=headers, method=request.method)
     try:
-        with urllib.request.urlopen(outgoing, timeout=TIMEOUT_SECONDS) as response:
+        with _OPENER.open(outgoing, timeout=TIMEOUT_SECONDS) as response:
             return HTTPResponse(response.status, response.read())
     except urllib.error.HTTPError as exc:
         return HTTPResponse(exc.code, exc.read())
@@ -952,7 +962,7 @@ def _decision(payload) -> str:
     return "ok"
 
 
-def _take_pages(fetch, limit: int, offset: int, page_cap: int = 50) -> list:
+def _take_pages(fetch, limit: int, offset: int, page_cap: int = PAGE_CAP) -> list:
     rows: list = []
     seen: set[str] = set()
     cursor = offset
@@ -983,7 +993,7 @@ def _take_pages(fetch, limit: int, offset: int, page_cap: int = 50) -> list:
     return rows[:limit]
 
 
-def _take_novels(fetch, limit: int, skip: int, page_cap: int = 50) -> list:
+def _take_novels(fetch, limit: int, skip: int, page_cap: int = PAGE_CAP) -> list:
     kept: list = []
     seen: set[str] = set()
     cursor = 0
