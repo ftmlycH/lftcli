@@ -284,9 +284,9 @@ class ClientTests(unittest.TestCase):
         import random as random_module
 
         rng = random_module.Random(1)
-        tags = client.select_recommend_tags(2, ["甲", "乙", "甲"], ["热门"], rng)
-        self.assertEqual(len(tags), 2)
-        self.assertTrue(set(tags) <= {"甲", "乙"})
+        tags = client.recommend_tag_candidates(["甲", "乙", "甲"], ["热门"], rng)
+        self.assertEqual(set(tags[:2]), {"甲", "乙"})
+        self.assertEqual(tags[2], "热门")
 
         rng = random_module.Random(2)
         tags = client.select_recommend_tags(3, ["甲"], ["热1", "热2", "甲"], rng)
@@ -295,10 +295,14 @@ class ClientTests(unittest.TestCase):
 
         rng = random_module.Random(3)
         tags = client.select_recommend_tags(5, ["甲"], ["热1"], rng)
-        self.assertEqual(tags, ["甲", "热1"])
+        self.assertEqual(tags[0], "甲")
+        self.assertEqual(tags[1], "热1")
+        self.assertEqual(len(tags), 5)
 
-        with self.assertRaises(client.ApiError):
-            client.select_recommend_tags(1, ["", "   "], [], random_module.Random(0))
+        # 喜欢和热门都空时，仍可用内置兜底标签。
+        tags = client.recommend_tag_candidates(["", "   "], [], random_module.Random(0))
+        self.assertTrue(tags)
+        self.assertTrue(set(tags) <= set(client.FALLBACK_HOT_TAGS))
 
     def test_account_tags_ignore_unrelated_fields(self):
         payload = {
@@ -338,67 +342,101 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].author, "作者")
         self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
 
-    def test_random_page_does_not_start_at_the_first_hot_page(self):
-        seen = {}
+    def test_random_returns_exact_count_from_shuffled_pages(self):
+        offsets = []
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            seen["offset"] = request.url.params["offset"]
-            items = [_item(post_id=i + 24, title=f"标题{i}") for i in range(12)]
+            offset = int(request.url.params["offset"])
+            offsets.append(offset)
+            base = offset
+            items = [_item(post_id=base + i, title=f"标题{base + i}") for i in range(12)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 36, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": offset + 12, "items": items}},
             )
 
         class Rng:
-            def randrange(self, stop):
-                return 2
-
             def shuffle(self, items):
-                return None
-
-            def choice(self, population):
-                return population[0]
+                items[:] = [2, 0, 1, 3, 4, 5][: len(items)]
 
             def sample(self, population, count):
                 return list(population)[:count]
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.sample_tag("原创小说", 1, rng=Rng())
-        self.assertEqual(seen["offset"], "24")
-        self.assertEqual(posts[0].post_id, "24")
+            posts = api.sample_tag("原创小说", 5, rng=Rng())
+        self.assertEqual(len(posts), 5)
+        self.assertEqual(offsets[0], 24)
+        self.assertEqual([post.post_id for post in posts], ["24", "25", "26", "27", "28"])
 
-    def test_random_falls_back_to_first_page_when_later_page_is_empty(self):
+    def test_random_keeps_scanning_until_count_is_met(self):
         offsets = []
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             offset = request.url.params["offset"]
             offsets.append(offset)
             if offset == "24":
-                items = []
+                image = _item(post_id=1, title="一")
+                image["post"]["type"] = 2
+                items = [image]
+            elif offset == "0":
+                items = [_item(post_id=i, title=f"小说{i}") for i in range(5)]
             else:
-                items = [_item(post_id=9, title="小说")]
+                items = []
             return client.HTTPResponse(
                 200,
                 json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
             )
 
         class Rng:
-            def randrange(self, stop):
-                return 2
-
             def shuffle(self, items):
-                return None
-
-            def choice(self, population):
-                return population[0]
+                items[:] = [2, 0, 1, 3, 4, 5][: len(items)]
 
             def sample(self, population, count):
                 return list(population)[:count]
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.sample_tag("原创小说", 1, rng=Rng())
-        self.assertEqual(offsets, ["24", "0"])
-        self.assertEqual([post.post_id for post in posts], ["9"])
+            posts = api.sample_tag("原创小说", 3, rng=Rng())
+        self.assertEqual(offsets[:2], ["24", "0"])
+        self.assertEqual(len(posts), 3)
+        self.assertEqual([post.post_id for post in posts], ["0", "1", "2"])
+
+    def test_recommend_returns_exact_count_across_tags(self):
+        calls = {"tags": []}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            tag = request.url.params.get("tag", "")
+            calls["tags"].append(tag)
+            # 甲 没有小说；乙、丙、丁 各有若干篇。
+            if tag == "甲":
+                items = []
+            elif tag in {"乙", "丙", "丁"}:
+                base = {"乙": 100, "丙": 200, "丁": 300}[tag]
+                items = [_item(post_id=base + i, title=f"{tag}{i}") for i in range(6)]
+            else:
+                items = [_item(post_id=900 + abs(hash(tag)) % 80 + i, title=f"{tag}{i}") for i in range(3)]
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
+            )
+
+        class Rng:
+            def shuffle(self, items):
+                # 固定喜欢/热门/兜底顺序，方便断言。
+                order = {"甲": 0, "乙": 1, "丙": 2, "丁": 3}
+                items.sort(key=lambda name: order.get(name, 100 + hash(name) % 50))
+
+            def sample(self, population, count):
+                return list(population)[:count]
+
+        liked = ["甲"]
+        hot = ["乙", "丙", "丁"]
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            api.get_favorite_tags = lambda: liked  # type: ignore[method-assign]
+            api.get_hot_tags = lambda: hot  # type: ignore[method-assign]
+            posts = api.recommend(3, rng=Rng())
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(len({post.post_id for post in posts}), 3)
 
     def test_following_parser_ignores_extra_fields(self):
         text = (

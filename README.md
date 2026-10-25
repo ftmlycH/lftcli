@@ -59,8 +59,8 @@ BSD 不用这两种包。
 | `likes` | 我喜欢的文章 |
 | `history` | 浏览过的文章 |
 | `tag <tag> [--sort hot\|new\|month]` | 标签检索。`hot` 总热度，`new` 最新，`month` 月榜 |
-| `random <tag> [--count N]` | 随机抽一页，不够再看第 0 页，最多 5 篇 |
-| `recommend <N>` | 先选标签，每个标签同样抽。最多 5 篇 |
+| `random <tag> [--count N]` | 从标签随机抽 N 篇，默认 1，最多 5 |
+| `recommend <N>` | 随机推荐 N 篇，1 到 5 |
 | `post <id 或链接>` | 读正文。`--markdown` 才带轻量标记 |
 | `clear` / `cls` | 清屏 |
 

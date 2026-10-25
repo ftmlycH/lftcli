@@ -35,7 +35,8 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 12
 MAX_PICKS = 5
-RANDOM_PAGES = 3
+# 随机最多扫这么多页；页内凑够篇数就停，控制请求次数。
+RANDOM_PAGES = 6
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -425,53 +426,96 @@ class LofterClient:
         _check_picks(count)
         return self._draw(tag, sort, count, rng or random)
 
-    def recommend(self, count: int) -> list[Post]:
+    def recommend(self, count: int, rng=None) -> list[Post]:
         _check_picks(count)
+        rng = rng or random
         liked = self.get_favorite_tags()
         hot = self.get_hot_tags()
         posts: list[Post] = []
         seen: set[str] = set()
-        for tag in select_recommend_tags(count, liked, hot, random):
+        working: list[str] = []
+        for tag in recommend_tag_candidates(liked, hot, rng):
             if len(posts) >= count:
                 break
             try:
-                picked = self._draw(tag, "hot", 1, random)
+                picked = self._draw(tag, "hot", 1, rng)
             except ApiError:
                 continue
-            for post in picked:
+            if not picked:
+                continue
+            post = picked[0]
+            if post.post_id in seen:
+                continue
+            seen.add(post.post_id)
+            posts.append(post)
+            working.append(tag)
+        # 每个标签一篇仍不够时，从已出过文的标签再抽。
+        for tag in working:
+            if len(posts) >= count:
+                break
+            need = count - len(posts)
+            try:
+                more = self._draw(tag, "hot", need, rng)
+            except ApiError:
+                continue
+            for post in more:
                 if post.post_id in seen:
                     continue
                 seen.add(post.post_id)
                 posts.append(post)
-        return posts
+                if len(posts) >= count:
+                    break
+        return posts[:count]
 
     def _draw(self, tag: str, sort: str, count: int, rng) -> list[Post]:
-        """先抽一页，不够或没有小说时再看第 0 页。最多两次请求。"""
+        """在标签页里随机取样，尽量凑满 count；页数有上限。"""
         api_sort = SORT_TO_API.get(sort)
         if api_sort is None:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-        start = rng.randrange(RANDOM_PAGES)
-        pages = [start] if start == 0 else [start, 0]
+        pages = list(range(RANDOM_PAGES))
+        rng.shuffle(pages)
         pool: list[Post] = []
         seen: set[str] = set()
-        for page in pages:
-            for post in self._tag_page(name, api_sort, page * TAG_PAGE_SIZE):
+        # 池子至少到 count*3，随机更稳；凑满或页扫完就停。
+        want = max(count * 3, count)
+        empty_streak = 0
+        saw_zero = False
+
+        def absorb(page: int) -> int:
+            nonlocal empty_streak, saw_zero
+            if page == 0:
+                saw_zero = True
+            rows = self._tag_page(name, api_sort, page * TAG_PAGE_SIZE)
+            added = 0
+            for post in rows:
                 if post.post_type != NOVEL_TYPE or post.post_id in seen:
                     continue
                 seen.add(post.post_id)
                 pool.append(post)
-            if len(pool) >= count:
+                added += 1
+            if not rows:
+                empty_streak += 1
+            else:
+                empty_streak = 0
+            return added
+
+        for page in pages:
+            absorb(page)
+            if len(pool) >= want:
                 break
+            # 连续空页：有货就停；没货也至少再确认过第 0 页。
+            if empty_streak >= 2 and (len(pool) >= count or saw_zero):
+                break
+        if len(pool) < count and not saw_zero:
+            absorb(0)
         if not pool:
             return []
         if len(pool) <= count:
             rng.shuffle(pool)
             return pool
-        if count == 1:
-            return [rng.choice(pool)]
         return rng.sample(pool, count)
 
     def _tag_page(self, tag: str, api_sort: str, offset: int) -> list[Post]:
@@ -674,21 +718,26 @@ def recommend(cookie: str, count: int) -> list[Post]:
     return _run(cookie, "recommend", count)
 
 
-def select_recommend_tags(count: int, liked, hot, rng) -> list[str]:
-    if count < 1:
-        raise ApiError("篇数至少为 1。")
+def recommend_tag_candidates(liked, hot, rng) -> list[str]:
+    """喜欢的标签优先，再热门，再内置兜底。打乱同组顺序后整表返回。"""
     liked_tags = _unique_tags(liked)
     liked_set = set(liked_tags)
     hot_tags = [tag for tag in _unique_tags(hot) if tag not in liked_set]
-    chosen: list[str] = []
-    if liked_tags:
-        chosen.extend(rng.sample(liked_tags, min(count, len(liked_tags))))
-    remain = count - len(chosen)
-    if remain > 0 and hot_tags:
-        chosen.extend(rng.sample(hot_tags, min(remain, len(hot_tags))))
+    used = liked_set | set(hot_tags)
+    fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in used]
+    rng.shuffle(liked_tags)
+    rng.shuffle(hot_tags)
+    rng.shuffle(fallback)
+    chosen = liked_tags + hot_tags + fallback
     if not chosen:
         raise ApiError("没有可用的标签，暂时不能推荐。")
     return chosen
+
+
+def select_recommend_tags(count: int, liked, hot, rng) -> list[str]:
+    if count < 1:
+        raise ApiError("篇数至少为 1。")
+    return recommend_tag_candidates(liked, hot, rng)[:count]
 
 
 def check_login(cookie: str) -> str:

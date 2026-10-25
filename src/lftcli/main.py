@@ -44,18 +44,14 @@ def main(argv: list[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lftcli",
-        description="在终端里读 LOFTER 的小说正文。输入 lftcli 进入 lofter> 。",
+        description="在终端读 LOFTER 文字小说。直接运行 lftcli 进入 lofter> 。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例:\n"
-            "  lftcli\n"
-            "  lofter> mine\n"
-            "  lofter> following\n"
+            "  lofter> tag 原创小说 --limit 5\n"
+            "  lofter> random 原创小说 --count 3\n"
             "  lofter> recommend 3\n"
-            "  lofter> collections 5333228\n"
-            "  lofter> tag 原创小说 --sort hot --limit 5\n"
             "  lofter> post 123456\n"
-            "  lofter> clear\n"
             "  lofter> exit\n"
         ),
     )
@@ -64,60 +60,60 @@ def _build_parser() -> argparse.ArgumentParser:
     cookie_cmd = commands.add_parser("cookie", help="查看或保存 Cookie")
     cookie_cmd.set_defaults(func=_cookie_status)
     cookie_actions = cookie_cmd.add_subparsers(dest="cookie_action")
-    cookie_actions.add_parser("status", help="查看是否已保存，不显示内容").set_defaults(func=_cookie_status)
-    cookie_set = cookie_actions.add_parser("set", help="保存 Cookie。终端里输入时不会回显")
-    cookie_set.add_argument("--no-check", action="store_true", help="只保存，不向服务器确认登录")
+    cookie_actions.add_parser("status", help="是否已保存").set_defaults(func=_cookie_status)
+    cookie_set = cookie_actions.add_parser("set", help="保存 Cookie")
+    cookie_set.add_argument("--no-check", action="store_true", help="只保存，不验证登录")
     cookie_set.set_defaults(func=_cookie_set)
-    cookie_actions.add_parser("check", help="用当前生效的 Cookie 确认登录").set_defaults(func=_cookie_check)
-    cookie_actions.add_parser("clear", help="删除配置文件里的 Cookie").set_defaults(func=_cookie_clear)
+    cookie_actions.add_parser("check", help="验证当前 Cookie").set_defaults(func=_cookie_check)
+    cookie_actions.add_parser("clear", help="删除已保存的 Cookie").set_defaults(func=_cookie_clear)
 
     for name in ("clear", "cls"):
-        screen = commands.add_parser(name, help="清空屏幕")
+        screen = commands.add_parser(name, help="清屏")
         screen.set_defaults(func=_clear_screen)
 
-    collections = commands.add_parser("collections", help="订阅的合集。写上 ID 就列出里面的文章")
-    collections.add_argument("collection_id", nargs="?", help="合集数字 ID，或带 collectionId= 的链接")
+    collections = commands.add_parser("collections", help="订阅合集；加 ID 列出其中文章")
+    collections.add_argument("collection_id", nargs="?", help="合集 ID 或链接")
     _add_page_args(collections, limit=20)
     collections.add_argument(
         "--order",
         choices=("old", "new"),
         default="old",
-        help="只在打开某个合集时有效。old 从旧到新，new 从新到旧",
+        help="合集内排序：old 旧到新，new 新到旧",
     )
     collections.set_defaults(func=_collections)
 
     _command(commands, "mine", "我发布的文字", _paged(client.get_my_posts, _show_posts), 20)
     _command(commands, "following", "关注的人发布的文字", _paged(client.get_following_posts, _show_posts), 20)
 
-    _command(commands, "likes", "我喜欢的文章（红心收藏）", _paged(client.get_likes, _show_posts), 20)
-    _command(commands, "history", "账号里浏览过的文章", _paged(client.get_history, _show_posts), 20)
+    _command(commands, "likes", "我喜欢的文章", _paged(client.get_likes, _show_posts), 20)
+    _command(commands, "history", "浏览记录", _paged(client.get_history, _show_posts), 20)
 
-    tag = commands.add_parser("tag", help="按标签检索")
-    tag.add_argument("tag", help="标签名，不用加 #")
-    tag.add_argument("--sort", choices=("hot", "new", "month"), default="hot", help="hot 总热度，new 最新，month 月榜")
+    tag = commands.add_parser("tag", help="按标签列出文章")
+    tag.add_argument("tag", help="标签名")
+    tag.add_argument("--sort", choices=("hot", "new", "month"), default="hot", help="hot / new / month")
     _add_page_args(tag, limit=20)
     tag.set_defaults(func=_tag)
 
-    random_cmd = commands.add_parser("random", help="从标签里随机抽几篇")
+    random_cmd = commands.add_parser("random", help="从标签随机抽文章")
     random_cmd.add_argument("tag", help="标签名")
-    random_cmd.add_argument("--sort", choices=("hot", "new", "month"), default="hot")
-    random_cmd.add_argument("--count", type=int, default=1, help="抽几篇，默认 1，最多 5")
+    random_cmd.add_argument("--sort", choices=("hot", "new", "month"), default="hot", help="hot / new / month")
+    random_cmd.add_argument("--count", type=int, default=1, help="篇数，1–5，默认 1")
     random_cmd.set_defaults(func=_random)
 
-    recommend_cmd = commands.add_parser("recommend", help="从喜欢的标签和热门标签里随机推荐几篇")
-    recommend_cmd.add_argument("count", type=int, help="想看几篇，1 到 5")
+    recommend_cmd = commands.add_parser("recommend", help="随机推荐文章")
+    recommend_cmd.add_argument("count", type=int, help="篇数，1–5")
     recommend_cmd.set_defaults(func=_recommend)
 
-    post = commands.add_parser("post", help="读一篇文章的纯文本")
-    post.add_argument("post_id_or_url", help="列表里的数字 ID，或文章链接")
-    post.add_argument("--markdown", action="store_true", help="输出轻量 Markdown，默认纯文本")
+    post = commands.add_parser("post", help="读一篇正文")
+    post.add_argument("post_id_or_url", help="文章 ID 或链接")
+    post.add_argument("--markdown", action="store_true", help="输出 Markdown")
     post.set_defaults(func=_post)
     return parser
 
 
 def _add_page_args(parser: argparse.ArgumentParser, limit: int) -> None:
     parser.add_argument("--limit", type=int, default=limit, help=f"条数，默认 {limit}")
-    parser.add_argument("--offset", type=int, default=0, help="跳过前几条")
+    parser.add_argument("--offset", type=int, default=0, help="跳过条数")
 
 
 def _command(commands, name: str, help_text: str, func, limit: int) -> None:
