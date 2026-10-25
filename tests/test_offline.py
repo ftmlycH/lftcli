@@ -342,23 +342,23 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].author, "作者")
         self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
 
-    def test_tag_group_count_uses_total_div_20(self):
-        self.assertEqual(client._tag_group_count({"count": 45, "offset": 20}), 2)
-        self.assertEqual(client._tag_group_count({"total": 19, "offset": -1}), 1)
-        self.assertEqual(client._tag_group_count({"count": 1000, "offset": 20}), 50)
-        self.assertEqual(client._tag_group_count({"offset": -1}), 1)
-        self.assertEqual(client._tag_group_count({"offset": 20}), 50)
-
-    def test_random_picks_group_zero_in_one_request(self):
-        pages = {"n": 0, "offsets": []}
+    def test_random_uses_search_tag_pool_and_returns_count(self):
+        pages = {"n": 0}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             pages["n"] += 1
-            pages["offsets"].append(request.url.params["offset"])
-            items = [_item(post_id=i, title=f"标题{i}") for i in range(20)]
+            # 前几页全是图，后面才有小说 —— 模拟 tag 翻页凑小说。
+            if pages["n"] <= 2:
+                image = _item(post_id=pages["n"], title="图")
+                image["post"]["type"] = 2
+                items = [image] * 10
+                nxt = pages["n"] * 20
+            else:
+                items = [_item(post_id=100 + i, title=f"小说{i}") for i in range(20)]
+                nxt = -1
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"count": 80, "offset": 20, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
             )
 
         class Rng:
@@ -369,33 +369,35 @@ class ClientTests(unittest.TestCase):
                 return None
 
             def sample(self, population, count):
-                self.pool = len(population)
                 return list(population)[:count]
 
-        rng = Rng()
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.sample_tag("原创小说", 5, rng=rng)
-        self.assertEqual(len(posts), 5)
-        self.assertEqual(rng.pool, 20)
-        self.assertEqual(pages["n"], 1)
-        self.assertEqual(pages["offsets"], ["0"])
+            posts = api.sample_tag("millsage", 2, rng=Rng())
+        self.assertEqual(len(posts), 2)
+        self.assertTrue(all(post.post_id.startswith("10") for post in posts))
+        self.assertGreaterEqual(pages["n"], 3)
 
-    def test_random_fetches_chosen_group_then_falls_back_if_empty(self):
+    def test_random_falls_back_to_start_zero_when_deep_group_is_empty(self):
         offsets = []
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             offset = request.url.params["offset"]
             offsets.append(offset)
-            if offset == "0":
-                items = [_item(post_id=i, title=f"头{i}") for i in range(20)]
-                body = {"count": 100, "offset": 20, "items": items}
+            # search_tag 的 API cursor：深组很快空，第 0 组有小说。
+            if offset != "0":
+                items = []
+                nxt = -1
             else:
-                body = {"count": 100, "offset": -1, "items": []}
-            return client.HTTPResponse(200, json={"meta": {"status": 200, "msg": ""}, "response": body})
+                items = [_item(post_id=i, title=f"文{i}") for i in range(12)]
+                nxt = -1
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
+            )
 
         class Rng:
             def randrange(self, stop):
-                return 2
+                return 3
 
             def sample(self, population, count):
                 return list(population)[:count]
@@ -405,9 +407,8 @@ class ClientTests(unittest.TestCase):
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("原创小说", 3, rng=Rng())
-        self.assertEqual(offsets, ["0", "40"])
         self.assertEqual(len(posts), 3)
-        self.assertEqual(posts[0].post_id, "0")
+        self.assertIn("0", offsets)
 
     def test_random_returns_available_when_tag_is_short(self):
         def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
@@ -415,7 +416,7 @@ class ClientTests(unittest.TestCase):
                 200,
                 json={
                     "meta": {"status": 200, "msg": ""},
-                    "response": {"count": 1, "offset": -1, "items": [_item(post_id=1, title="仅一篇")]},
+                    "response": {"offset": -1, "items": [_item(post_id=1, title="仅一篇")]},
                 },
             )
 
@@ -433,6 +434,38 @@ class ClientTests(unittest.TestCase):
             posts = api.sample_tag("冷门", 3, rng=Rng())
         self.assertEqual([post.post_id for post in posts], ["1"])
 
+    def test_random_tries_other_sorts_when_hot_is_empty(self):
+        seen = {"types": []}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            kind = request.url.params.get("type", "")
+            seen["types"].append(kind)
+            if kind == "total":
+                items = []
+                nxt = -1
+            else:
+                items = [_item(post_id=20 + i, title=f"新{i}") for i in range(8)]
+                nxt = -1
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
+            )
+
+        class Rng:
+            def randrange(self, stop):
+                return 0
+
+            def shuffle(self, items):
+                return None
+
+            def sample(self, population, count):
+                return list(population)[:count]
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.sample_tag("冷门", 2, sort="hot", rng=Rng())
+        self.assertEqual(len(posts), 2)
+        self.assertIn("new", seen["types"])
+
     def test_recommend_samples_from_liked_tag_pool(self):
         calls = {"tags": []}
 
@@ -443,12 +476,14 @@ class ClientTests(unittest.TestCase):
                     200,
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "乙"}]}},
                 )
+            if "exploreRecom" in url:
+                return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             calls["tags"].append(tag)
             items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(20)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"count": 40, "offset": 20, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
             )
 
         class Rng:
@@ -464,7 +499,7 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.recommend(3, rng=Rng())
         self.assertEqual(len(posts), 3)
-        self.assertEqual(calls["tags"], ["乙"])
+        self.assertEqual(calls["tags"][0], "乙")
 
     def test_recommend_switches_tag_when_first_is_empty(self):
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
@@ -474,6 +509,8 @@ class ClientTests(unittest.TestCase):
                     200,
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "甲"}]}},
                 )
+            if "exploreRecom" in url:
+                return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             if tag == "甲":
                 items = []
@@ -481,10 +518,7 @@ class ClientTests(unittest.TestCase):
                 items = [_item(post_id=10 + abs(hash(tag)) % 50 + i, title=f"{tag}{i}") for i in range(20)]
             return client.HTTPResponse(
                 200,
-                json={
-                    "meta": {"status": 200, "msg": ""},
-                    "response": {"count": 0 if not items else 40, "offset": -1 if not items else 20, "items": items},
-                },
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1 if not items else 20, "items": items}},
             )
 
         class Rng:
