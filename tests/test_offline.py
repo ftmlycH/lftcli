@@ -675,6 +675,23 @@ class ClientTests(unittest.TestCase):
             posts = api.search_tag("原创小说", limit=5)
         self.assertEqual([post.post_id for post in posts], ["2"])
 
+    def test_tag_requests_novel_post_types(self):
+        seen = {"postTypes": None}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            seen["postTypes"] = request.url.params.get("postTypes")
+            return client.HTTPResponse(
+                200,
+                json={
+                    "meta": {"status": 200, "msg": ""},
+                    "response": {"offset": -1, "items": [_item(post_id=3)]},
+                },
+            )
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            api.search_tag("millsage", limit=1)
+        self.assertEqual(seen["postTypes"], "1")
+
     def test_one_bad_post_does_not_drop_the_page(self):
         def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
             return client.HTTPResponse(

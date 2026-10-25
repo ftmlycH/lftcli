@@ -28,15 +28,17 @@ URL_LIKES = "https://www.lofter.com/dwr/call/plaincall/MobilePostBean.getFavTrac
 URL_FOLLOWING = "https://www.lofter.com/dwr/call/plaincall/UserBean.getUserFollowingList.dwr"
 URL_EXPLORE = "https://api.lofter.com/recommend/exploreRecom.json"
 FALLBACK_HOT_TAGS = (
-    "原创小说", "原创", "无CP", "短篇", "小说", "完结",
+    "原创小说", "原创", "无CP", "短篇", "小说", "完结", "竹林组",
     "mujica", "初祥", "tksy", "海喵", "东方project", "八意永琳", "东方",
     "mygo", "海铃立希", "明日方舟", "少女前线", "原神", "永远的7日之都",
-    "三角初华", "三角初音",
+    "三角初华", "三角初音", "鸣潮", "崩坏3", "第五人格", "王者荣耀", "赛马娘", "lovelive", "少女与战车",
 )
 TAG_PAGE_SIZE = 20
 MAX_PICKS = 5
-SAMPLE_POOL = 20
+SAMPLE_POOL = 12
 NOVEL_TYPE = 1
+# 标签流里筛小说，避免热门页被图片占满后空翻十几页。
+TAG_POST_TYPES = str(NOVEL_TYPE)
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
 
@@ -45,6 +47,8 @@ MIN_INTERVAL_SECONDS = 0.03
 MAX_ATTEMPTS = 3
 PAGE_CAP = 40
 RETRY_HTTP = {429, 500, 502, 503, 504}
+# 推荐最多试几个标签，避免冷门标签连环空翻。
+RECOMMEND_TAG_TRIES = 6
 AUTH_MESSAGE = "Cookie 已失效，请重新从浏览器复制 LOFTER-PHONE-LOGIN-AUTH 或 LOFTER_SESS。"
 _POST_URL = re.compile(
     r"(?:https?://)?(?:[\w.-]+\.)?lofter\.com/post/([0-9a-fA-F]+)_([0-9a-fA-F]+)",
@@ -219,8 +223,8 @@ class LofterClient:
             raise ApiError("排序只能是 hot、new 或 month。")
 
         need = offset + limit
-        # 图多时一页几乎没有小说，页数按需求放大，避免 --offset 直接空。
-        pages = max_pages if max_pages is not None else min(80, max(16, need * 4))
+        # 有 postTypes 后通常 1～2 页就够；仍保留足够上限，防接口忽略筛选时短页。
+        pages = max_pages if max_pages is not None else min(40, max(12, need + 8))
         found: list[Post] = []
         seen: set[str] = set()
         cursor = 0
@@ -239,6 +243,7 @@ class LofterClient:
                     "firstpermalink": "null",
                     "tag": name,
                     "type": api_sort,
+                    "postTypes": TAG_POST_TYPES,
                 },
                 content=b"null",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -355,7 +360,7 @@ class LofterClient:
     def get_my_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         return self.get_blog_posts(self._blog_domain(), limit, offset)
 
-    def get_blog_posts(self, blog: str, limit: int = 20, offset: int = 0) -> list[Post]:
+    def get_blog_posts(self, blog: str, limit: int = 20, offset: int = 0, max_pages: int | None = None) -> list[Post]:
         _check_window(limit, offset)
         domain = _blog_domain_from_user(blog)
 
@@ -383,7 +388,14 @@ class LofterClient:
             return rows, _as_int(data.get("offset")), None
 
         return _map_rows(
-            _take_novels(fetch, limit, offset, page_cap=max(limit + offset, 10)),
+            _take_novels(
+                fetch,
+                limit,
+                offset,
+                page_cap=max(limit + offset, 10),
+                max_pages=max_pages,
+                max_empty_novel_pages=2,
+            ),
             lambda row: _to_post(row, with_html=False),
             "博客文章的返回结构和预期不一致，请只更新 client.py。",
         )
@@ -408,17 +420,17 @@ class LofterClient:
     def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
         need = offset + limit
-        # 少请求：少扫几人，每人只取够用的篇数。
-        blog_limit = min(10, max(need, 4))
+        # 多人各取最新一页：避免图博在 get_blog_posts 里空翻几十页。
+        blog_limit = min(8, max(3, need))
+        per_blog = min(20, max(need, 8))
         blogs = self.get_following(limit=blog_limit, offset=0)
         found: list[Post] = []
         seen: set[str] = set()
-        per_blog = min(6, max((need + blog_limit - 1) // max(blog_limit, 1), 2))
         for blog in blogs:
             if len(found) >= need:
                 break
             try:
-                batch = self.get_blog_posts(blog.name, limit=per_blog, offset=0)
+                batch = self.get_blog_posts(blog.name, limit=per_blog, offset=0, max_pages=1)
             except ApiError:
                 continue
             for post in batch:
@@ -444,7 +456,7 @@ class LofterClient:
         liked_set = set(liked)
         fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in liked_set]
         rng.shuffle(fallback)
-        for name in liked + fallback:
+        for name in (liked + fallback)[:RECOMMEND_TAG_TRIES]:
             try:
                 posts = self._sample_from_tag(name, count, "hot", rng)
             except ApiError:
@@ -460,9 +472,10 @@ class LofterClient:
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-        pool = self.search_tag(name, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=12)
+        pool_size = max(count, min(SAMPLE_POOL, max(count * 3, count)))
+        pool = self.search_tag(name, sort=sort, limit=pool_size, offset=0, max_pages=4)
         if len(pool) < count and sort != "new":
-            more = self.search_tag(name, sort="new", limit=SAMPLE_POOL, offset=0, max_pages=12)
+            more = self.search_tag(name, sort="new", limit=pool_size, offset=0, max_pages=4)
             if len(more) > len(pool):
                 pool = more
         return _pick(pool, count, rng)
@@ -981,18 +994,28 @@ def _take_pages(fetch, limit: int, offset: int, page_cap: int = PAGE_CAP) -> lis
     return rows[:limit]
 
 
-def _take_novels(fetch, limit: int, skip: int, page_cap: int = PAGE_CAP) -> list:
+def _take_novels(
+    fetch,
+    limit: int,
+    skip: int,
+    page_cap: int = PAGE_CAP,
+    max_pages: int | None = None,
+    max_empty_novel_pages: int | None = None,
+) -> list:
     kept: list = []
     seen: set[str] = set()
     cursor = 0
     target = skip + limit
-    for _ in range(60):
+    empty_novel_pages = 0
+    page_budget = 60 if max_pages is None else max(1, max_pages)
+    for _ in range(page_budget):
         if len(kept) >= target:
             break
         batch, nxt, total = fetch(cursor, page_cap)
         if not batch:
             break
         fresh = 0
+        novel_hits = 0
         for row in batch:
             key = _row_key(row)
             if key is not None:
@@ -1003,8 +1026,15 @@ def _take_novels(fetch, limit: int, skip: int, page_cap: int = PAGE_CAP) -> list
             if not _is_novel_row(row):
                 continue
             kept.append(row)
+            novel_hits += 1
         if fresh == 0:
             break
+        if novel_hits == 0:
+            empty_novel_pages += 1
+            if max_empty_novel_pages is not None and empty_novel_pages >= max_empty_novel_pages:
+                break
+        else:
+            empty_novel_pages = 0
         # 有明确下一页游标就继续，绝不能因「本页条数 < page_cap」误停。
         if isinstance(nxt, int) and nxt > cursor:
             cursor = nxt
