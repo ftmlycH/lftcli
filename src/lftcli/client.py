@@ -35,8 +35,8 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 12
 MAX_PICKS = 5
-# 随机池上限：够抽即可，少请求。
-SAMPLE_POOL_CAP = 12
+# 随机池略大于篇数；推荐按缺口补，够了就停。
+FILL_PAGES = 16
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -423,27 +423,33 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """拉一小池小说再随机抽；不够就返回已有的。"""
+        """拉一小池小说再随机抽；标签太少时有多少回多少。"""
         _check_picks(count)
         rng = rng or random
-        pool_size = min(SAMPLE_POOL_CAP, max(count * 2, count))
-        pool = self.search_tag(tag, sort=sort, limit=pool_size, offset=0, max_pages=3)
+        want = min(TAG_PAGE_SIZE, count + 3)
+        pool = self.search_tag(tag, sort=sort, limit=want, offset=0, max_pages=FILL_PAGES)
         return _pick(pool, count, rng)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """按标签补全到 count；够了就停，不够返回已有的。"""
+        """按标签补缺口，够 count 就停；不够换下一标签继续凑。"""
         _check_picks(count)
         rng = rng or random
         posts: list[Post] = []
         seen: set[str] = set()
 
         def absorb(tags: list[str]) -> None:
-            for tag in tags:
+            for name in tags:
                 if len(posts) >= count:
                     return
                 need = count - len(posts)
                 try:
-                    batch = self.search_tag(tag, sort="hot", limit=max(need, 3), offset=0, max_pages=2)
+                    batch = self.search_tag(
+                        name,
+                        sort="hot",
+                        limit=min(need + 2, TAG_PAGE_SIZE),
+                        offset=0,
+                        max_pages=3,
+                    )
                 except ApiError:
                     continue
                 available = [post for post in batch if post.post_id not in seen]
