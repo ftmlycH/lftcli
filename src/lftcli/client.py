@@ -35,14 +35,12 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 20
 MAX_PICKS = 5
-# 随机池略大于篇数；推荐按缺口补，够了就停。
-FILL_PAGES = 8
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
 
-TIMEOUT_SECONDS = 12.0
-MIN_INTERVAL_SECONDS = 0.1
+TIMEOUT_SECONDS = 10.0
+MIN_INTERVAL_SECONDS = 0.05
 MAX_ATTEMPTS = 3
 PAGE_CAP = 40
 RETRY_HTTP = {429, 500, 502, 503, 504}
@@ -430,60 +428,79 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """拉一小池小说再随机抽；标签太少时有多少回多少。"""
+        """只打 1～2 次标签页：随机一页，不够再补第 0 页。"""
         _check_picks(count)
         rng = rng or random
-        want = min(TAG_PAGE_SIZE, count + 3)
-        pool = self.search_tag(tag, sort=sort, limit=want, offset=0, max_pages=FILL_PAGES)
+        api_sort = SORT_TO_API.get(sort)
+        if api_sort is None:
+            raise ApiError("排序只能是 hot、new 或 month。")
+        name = tag.strip()
+        if not name:
+            raise ApiError("标签不能为空。")
+        start = rng.choice((0, TAG_PAGE_SIZE, TAG_PAGE_SIZE * 2))
+        pool = self._tag_novels(name, api_sort, start)
+        if len(pool) < count and start != 0:
+            more = self._tag_novels(name, api_sort, 0)
+            seen = {post.post_id for post in pool}
+            pool.extend(post for post in more if post.post_id not in seen)
         return _pick(pool, count, rng)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """按标签补缺口，够 count 就停；不够换下一标签继续凑。"""
+        """喜欢标签 + 内置兜底，每标签只取一页，凑满就停。"""
         _check_picks(count)
         rng = rng or random
         posts: list[Post] = []
         seen: set[str] = set()
-
-        def absorb(tags: list[str]) -> None:
-            for name in tags:
-                if len(posts) >= count:
-                    return
-                need = count - len(posts)
-                try:
-                    batch = self.search_tag(
-                        name,
-                        sort="hot",
-                        limit=min(need + 2, TAG_PAGE_SIZE),
-                        offset=0,
-                        max_pages=2,
-                    )
-                except ApiError:
-                    continue
-                available = [post for post in batch if post.post_id not in seen]
-                if not available:
-                    continue
-                for post in _pick(available, min(need, len(available)), rng):
-                    seen.add(post.post_id)
-                    posts.append(post)
-
         liked = _unique_tags(self.get_favorite_tags())
         rng.shuffle(liked)
-        absorb(liked)
-        if len(posts) >= count:
-            return posts[:count]
-
         liked_set = set(liked)
-        hot = [tag for tag in _unique_tags(self.get_hot_tags()) if tag not in liked_set]
-        rng.shuffle(hot)
-        absorb(hot)
-        if len(posts) >= count:
-            return posts[:count]
-
-        used = liked_set | set(hot)
-        fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in used]
+        fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in liked_set]
         rng.shuffle(fallback)
-        absorb(fallback)
+        for name in liked + fallback:
+            if len(posts) >= count:
+                break
+            need = count - len(posts)
+            try:
+                batch = self._tag_novels(name, SORT_TO_API["hot"], 0)
+            except ApiError:
+                continue
+            available = [post for post in batch if post.post_id not in seen]
+            if not available:
+                continue
+            for post in _pick(available, min(need, len(available)), rng):
+                seen.add(post.post_id)
+                posts.append(post)
         return posts[:count]
+
+    def _tag_novels(self, tag: str, api_sort: str, offset: int) -> list[Post]:
+        """单次请求取一页，只留文字小说。"""
+        payload = self._request(
+            "POST",
+            URL_TAG_POSTS,
+            params={
+                "product": PRODUCT,
+                "method": "newTagSearch",
+                "offset": str(offset),
+                "limit": str(TAG_PAGE_SIZE),
+                "firstpermalink": "null",
+                "tag": tag,
+                "type": api_sort,
+            },
+            content=b"null",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        rows = _expect_response(payload).get("items") or []
+        if not isinstance(rows, list):
+            return []
+        posts: list[Post] = []
+        for row in rows:
+            try:
+                post = _to_post(row, with_html=False)
+            except ApiError:
+                continue
+            if post.post_type == NOVEL_TYPE:
+                posts.append(post)
+        return posts
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})

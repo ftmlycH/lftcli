@@ -342,20 +342,22 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].author, "作者")
         self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
 
-    def test_random_samples_from_small_pool_with_few_requests(self):
-        pages = {"n": 0}
+    def test_random_uses_one_tag_page(self):
+        pages = {"n": 0, "offsets": []}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            page = pages["n"]
             pages["n"] += 1
-            base = page * 12
-            items = [_item(post_id=base + i, title=f"标题{base + i}") for i in range(12)]
+            pages["offsets"].append(request.url.params["offset"])
+            items = [_item(post_id=i, title=f"标题{i}") for i in range(12)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": base + 12, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
             )
 
         class Rng:
+            def choice(self, seq):
+                return 0
+
             def shuffle(self, items):
                 return None
 
@@ -365,24 +367,28 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("原创小说", 5, rng=Rng())
         self.assertEqual(len(posts), 5)
-        self.assertEqual([post.post_id for post in posts], ["0", "1", "2", "3", "4"])
-        self.assertLessEqual(pages["n"], 2)
+        self.assertEqual(pages["n"], 1)
+        self.assertEqual(pages["offsets"], ["0"])
 
-    def test_random_skips_images_until_count_is_met(self):
+    def test_random_falls_back_to_first_page_when_needed(self):
+        offsets = []
+
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            offset = int(request.url.params["offset"])
-            if offset == 0:
-                image = _item(post_id=1, title="图")
-                image["post"]["type"] = 2
-                items = [image] + [_item(post_id=10 + i, title=f"小说{i}") for i in range(5)]
+            offset = request.url.params["offset"]
+            offsets.append(offset)
+            if offset == "40":
+                items = [_item(post_id=1, title="一")]
             else:
-                items = [_item(post_id=100 + offset + i, title=f"后{i}") for i in range(12)]
+                items = [_item(post_id=10 + i, title=f"小说{i}") for i in range(5)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": offset + 12, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
             )
 
         class Rng:
+            def choice(self, seq):
+                return 40
+
             def sample(self, population, count):
                 return list(population)[:count]
 
@@ -391,8 +397,8 @@ class ClientTests(unittest.TestCase):
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("原创小说", 3, rng=Rng())
+        self.assertEqual(offsets, ["40", "0"])
         self.assertEqual(len(posts), 3)
-        self.assertTrue(all(post.post_id != "1" for post in posts))
 
     def test_random_returns_what_it_has_when_tag_is_short(self):
         def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
@@ -405,6 +411,9 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
+            def choice(self, seq):
+                return 0
+
             def shuffle(self, items):
                 return None
 
@@ -415,8 +424,8 @@ class ClientTests(unittest.TestCase):
             posts = api.sample_tag("冷门", 3, rng=Rng())
         self.assertEqual([post.post_id for post in posts], ["1"])
 
-    def test_recommend_fills_across_tags_and_stops_early(self):
-        calls = {"tags": [], "hot": 0}
+    def test_recommend_fills_from_one_liked_tag_in_one_page(self):
+        calls = {"tags": [], "explore": 0}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             url = request.url.full
@@ -426,12 +435,11 @@ class ClientTests(unittest.TestCase):
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "乙"}]}},
                 )
             if "exploreRecom" in url:
-                calls["hot"] += 1
+                calls["explore"] += 1
                 return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             calls["tags"].append(tag)
-            base = {"乙": 100, "丙": 200}.get(tag, 900)
-            items = [_item(post_id=base + i, title=f"{tag}{i}") for i in range(6)]
+            items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(8)]
             return client.HTTPResponse(
                 200,
                 json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
@@ -447,12 +455,10 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.recommend(3, rng=Rng())
         self.assertEqual(len(posts), 3)
-        self.assertEqual(len({post.post_id for post in posts}), 3)
-        # 喜欢的标签已够，不必再打热门接口。
-        self.assertEqual(calls["hot"], 0)
         self.assertEqual(calls["tags"], ["乙"])
+        self.assertEqual(calls["explore"], 0)
 
-    def test_recommend_keeps_filling_from_next_tags(self):
+    def test_recommend_keeps_filling_from_fallback_tags(self):
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             url = request.url.full
             if "usercounts" in url:
@@ -460,8 +466,6 @@ class ClientTests(unittest.TestCase):
                     200,
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "甲"}]}},
                 )
-            if "exploreRecom" in url:
-                return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             if tag == "甲":
                 items = [_item(post_id=1, title="甲1")]
