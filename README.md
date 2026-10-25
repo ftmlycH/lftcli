@@ -1,6 +1,7 @@
 # lofter-cli / lftcli
 
-在终端里读 LOFTER 的文字小说。
+在终端里读 LOFTER 的文字小说。需要 Python 3.10+，没有第三方库。
+
 ```bash
 git clone https://github.com/ftmlycH/lftcli.git
 cd lftcli
@@ -21,11 +22,14 @@ cd lftcli
 | OpenBSD | `pkg_add python3` |
 | NetBSD | `pkgin install python312`，之后用 `python3.12` |
 
-Debian、Ubuntu 可以使用deb包安装
+Debian、Ubuntu 不用 apt 装这个包：
+
 ```bash
 python3 packaging/build_deb.py
 sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 ```
+
+BSD 不用这个 `.deb`。
 
 配置文件：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，其他系统是 `~/.lofter-cli/config.json`。
 
@@ -36,6 +40,8 @@ sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 `cookie` 只显示是否保存和长度，不显示内容。环境变量 `LOFTER_COOKIE` 优先于配置文件。
 
 ## 命令
+
+在 `lofter>` 里直接输入，不要加 `lftcli`。`exit` 退出。列表只保留文字小说。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -51,6 +57,8 @@ sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 | `post <id 或链接>` | 读正文。`--markdown` 才带轻量标记 |
 | `clear` / `cls` | 清屏 |
 
+列表一行一篇：`[文章ID] 标题 · 作者 · 热度 123`。`post` 数字 ID 只能打开列表里出现过的文章，对应关系记在 `~/.lofter-cli/posts.json`。有链接时直接把链接传给 `post`。
+
 ## 说明
 
-地址和参数只在 `src/lftcli/client.py`。超时 15 秒，相邻请求至少间隔 0.3 秒，连接失败、超时和 HTTP 429 / 5xx 最多试 3 次。接口不是官方的，付费或仅自己可见的正文可能拿不到。
+地址和参数只在 `src/lftcli/client.py`。超时 15 秒，相邻请求至少间隔 0.3 秒，连接失败、超时和 HTTP 429 / 5xx 最多试 3 次。接口不是官方的，付费或仅自己可见的正文可能拿不到。不支持图片。
