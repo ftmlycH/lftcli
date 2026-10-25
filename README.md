@@ -1,6 +1,6 @@
 # lofter-cli / lftcli
 
-在终端里读 LOFTER 的文字小说。需要 Python 3.10+，没有第三方库。
+在终端里读 LOFTER 的文字小说。
 
 ```bash
 git clone https://github.com/ftmlycH/lftcli.git
