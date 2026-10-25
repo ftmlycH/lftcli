@@ -37,8 +37,6 @@ sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 
 ## 命令
 
-在 `lofter>` 里直接输入，不要加 `lftcli`。`exit` 退出。列表只保留文字小说。
-
 | 命令 | 作用 |
 | --- | --- |
 | `cookie` | 查看、保存或删除 Cookie |
