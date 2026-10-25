@@ -42,8 +42,6 @@ SAMPLE_POOL = 12
 # 未知标签深度时的默认/最大 API 游标（约页数 * 12）。
 TAG_DEPTH_DEFAULT = 600
 TAG_DEPTH_MAX = 12000
-# 关注流：按博主稳定顺序翻页时，估计每人首页小说数。
-FOLLOW_NOVELS_PER_BLOG = 8
 NOVEL_TYPE = 1
 # 标签流里筛小说，避免热门页被图片占满后空翻十几页。
 TAG_POST_TYPES = str(NOVEL_TYPE)
@@ -493,87 +491,46 @@ class LofterClient:
             )
             return _parse_following(text)
 
-        return _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
+        blogs = _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
+        if blogs and offset == 0:
+            # 合并进本地缓存，供 following <id> 解析博主名。
+            known: dict[str, Blog] = {}
+            for row in config.load_following_blogs():
+                blog_id = str(row.get("blog_id") or "")
+                name = str(row.get("name") or "")
+                if blog_id and name:
+                    known[blog_id] = Blog(
+                        blog_id=blog_id,
+                        name=name,
+                        nickname=str(row.get("nickname") or name),
+                        url=str(row.get("url") or ""),
+                    )
+            for blog in blogs:
+                known[blog.blog_id] = blog
+            config.save_following_blogs(list(known.values()))
+        return blogs
 
-    def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
-        """关注小说流：重建时并行拉帖并缓存，翻页直接切缓存，保证可翻完且 <8s。"""
-        _check_window(limit, offset)
+    def get_following_blog_posts(self, blog_key: str, limit: int = 20, offset: int = 0) -> list[Post]:
+        """按关注博主 ID / blogName 列出其文字小说。"""
+        name = self._resolve_following_blog(blog_key)
         need = offset + limit
-        cached_posts = [_post_from_cache(row) for row in config.load_following_posts()]
-        if offset == 0 or need > len(cached_posts):
-            cached_posts = self._rebuild_following_posts(need)
-        return cached_posts[offset : offset + limit]
+        pages = min(8, max(1, (need + 19) // 20))
+        return self.get_blog_posts(name, limit=limit, offset=offset, max_pages=pages)
 
-    def _rebuild_following_posts(self, need: int) -> list[Post]:
-        blog_limit = min(80, max(16, (need // FOLLOW_NOVELS_PER_BLOG) + 10))
-        blogs = [
-            Blog(
-                blog_id=str(row["blog_id"]),
-                name=str(row["name"]),
-                nickname=str(row.get("nickname") or row["name"]),
-                url=str(row.get("url") or ""),
-            )
-            for row in config.load_following_blogs()
-        ]
-        if not blogs:
-            blogs = self.get_following(limit=blog_limit, offset=0)
-            if blogs:
-                config.save_following_blogs(blogs)
-        if not blogs:
-            config.save_following_posts([])
-            return []
-        blogs = sorted(blogs, key=lambda blog: (blog.blog_id, blog.name))
-        prefetched = self._prefetch_following_posts(blogs[: min(len(blogs), 20)], max(need, 40))
-        found: list[Post] = []
-        seen: set[str] = set()
-        for blog in blogs:
-            batch = prefetched.get(blog.blog_id) or []
-            for post in batch:
-                if post.post_id in seen:
-                    continue
-                seen.add(post.post_id)
-                found.append(post)
-        config.save_following_posts(found)
-        return found
-
-    def _prefetch_following_posts(self, blogs: list[Blog], need: int) -> dict[str, list[Post]]:
-        if not blogs:
-            return {}
-        ordered = sorted(blogs, key=lambda blog: (blog.blog_id, blog.name))
-        take = min(len(ordered), max(3, (need // FOLLOW_NOVELS_PER_BLOG) + 3))
-        targets = ordered[:take]
-        if self._transport is not None or len(targets) == 1:
-            out: dict[str, list[Post]] = {}
-            for blog in targets:
-                try:
-                    out[blog.blog_id] = self.get_blog_posts(
-                        blog.name, limit=max(need, FOLLOW_NOVELS_PER_BLOG), offset=0, max_pages=1
-                    )
-                except ApiError:
-                    out[blog.blog_id] = []
-            return out
-
-        def job(blog: Blog):
-            child = self._child_client()
-            with child:
-                try:
-                    posts = child.get_blog_posts(
-                        blog.name, limit=max(need, FOLLOW_NOVELS_PER_BLOG), offset=0, max_pages=1
-                    )
-                except Exception:
-                    posts = []
-                return blog.blog_id, posts
-
-        out = {}
-        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
-            futures = [pool.submit(job, blog) for blog in targets]
-            for fut in as_completed(futures):
-                try:
-                    blog_id, posts = fut.result()
-                except Exception:
-                    continue
-                out[blog_id] = posts
-        return out
+    def _resolve_following_blog(self, blog_key: str) -> str:
+        key = str(blog_key or "").strip()
+        if not key:
+            raise ApiError("请提供关注博主的 ID 或 blogName。")
+        if key.isdigit():
+            for row in config.load_following_blogs():
+                if str(row.get("blog_id")) == key and row.get("name"):
+                    return str(row["name"])
+            # 缓存没有时扫一页关注列表。
+            for blog in self.get_following(limit=50, offset=0):
+                if blog.blog_id == key:
+                    return blog.name
+            raise ApiError("关注列表里找不到这个 ID。先运行 following 查看名单。")
+        return key
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
         """在标签全文小说流上系统熵选游标，真随机抽取。"""
@@ -895,8 +852,8 @@ def get_following(cookie: str, limit: int = 20, offset: int = 0) -> list[Blog]:
     return _run(cookie, "get_following", limit, offset)
 
 
-def get_following_posts(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
-    return _run(cookie, "get_following_posts", limit, offset)
+def get_following_blog_posts(cookie: str, blog_key: str, limit: int = 20, offset: int = 0) -> list[Post]:
+    return _run(cookie, "get_following_blog_posts", blog_key, limit, offset)
 
 
 def sample_tag(cookie: str, tag: str, count: int = 1, sort: str = "hot") -> list[Post]:
@@ -1537,19 +1494,6 @@ def _pick(pool: list[Post], count: int, rng) -> list[Post]:
         rng.shuffle(picked)
         return picked
     return rng.sample(pool, count)
-
-
-def _post_from_cache(row: dict) -> Post:
-    return Post(
-        post_id=str(row.get("post_id") or ""),
-        title=str(row.get("title") or "无标题"),
-        author=str(row.get("author") or "未知"),
-        hot=int(row.get("hot") or 0),
-        blog_id=str(row.get("blog_id") or ""),
-        url=str(row.get("url") or ""),
-        publish_time=int(row.get("publish_time") or 0),
-        post_type=int(row.get("post_type") or NOVEL_TYPE),
-    )
 
 
 def _pick_recommend_tags(liked: list[str], count: int, rng) -> list[str]:

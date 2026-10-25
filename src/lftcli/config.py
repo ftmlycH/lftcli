@@ -192,39 +192,6 @@ def save_following_blogs(blogs) -> None:
     _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
-def load_following_posts() -> list[dict]:
-    data = _read_config()
-    rows = data.get("following_posts") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return []
-    return [row for row in rows if isinstance(row, dict) and row.get("post_id")]
-
-
-def save_following_posts(posts) -> None:
-    rows: list[dict] = []
-    for post in posts:
-        post_id = str(getattr(post, "post_id", "") or "").strip()
-        if not post_id:
-            continue
-        rows.append(
-            {
-                "post_id": post_id,
-                "title": str(getattr(post, "title", "") or ""),
-                "author": str(getattr(post, "author", "") or ""),
-                "hot": int(getattr(post, "hot", 0) or 0),
-                "blog_id": str(getattr(post, "blog_id", "") or ""),
-                "url": str(getattr(post, "url", "") or ""),
-                "publish_time": int(getattr(post, "publish_time", 0) or 0),
-                "post_type": int(getattr(post, "post_type", 1) or 1),
-            }
-        )
-        if len(rows) >= 200:
-            break
-    data = _read_config()
-    data["following_posts"] = rows
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-
 def cookie_status_lines() -> list[str]:
     lines = [f"配置文件：{CONFIG_PATH}"]
     try:

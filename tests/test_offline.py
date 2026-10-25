@@ -460,7 +460,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(posts), 100)
         self.assertGreaterEqual(pages["n"], 9)
 
-    def test_following_offset_walks_stable_blog_order(self):
+    def test_following_id_lists_that_blog_novels(self):
         original = config.CONFIG_PATH
         config.CONFIG_PATH = Path(tempfile.gettempdir()) / "lofter-cli-following-test.json"
         try:
@@ -471,32 +471,22 @@ class ClientTests(unittest.TestCase):
                 url = request.url.full
                 if "getUserFollowingList" in url:
                     text = (
-                        's0.blogName="a";s0.blogNickName="A";s0.blogId=1;s0.homePageUrl="https://a.lofter.com";\n'
-                        's1.blogName="b";s1.blogNickName="B";s1.blogId=2;s1.homePageUrl="https://b.lofter.com";\n'
-                        's2.blogName="c";s2.blogNickName="C";s2.blogId=3;s2.homePageUrl="https://c.lofter.com";\n'
-                        "dwr.engine._remoteHandleCallback('1','0',[s0,s1,s2]);"
+                        's0.blogName="alpha";s0.blogNickName="作者A";s0.blogId=12;s0.homePageUrl="https://alpha.lofter.com";\n'
+                        "dwr.engine._remoteHandleCallback('1','0',[s0]);"
                     )
                     return client.HTTPResponse(200, text=text)
-                domain = ""
-                if request.data:
-                    domain = str(request.data.get("blogdomain") or "")
-                name = domain.split(".")[0] if domain else "x"
-                base = {"a": 100, "b": 200, "c": 300}.get(name, 900)
-                items = [_item(post_id=base + i, title=f"{name}{i}", author=name) for i in range(5)]
+                items = [_item(post_id=100 + i, title=f"文{i}", author="作者A") for i in range(5)]
                 return client.HTTPResponse(
                     200,
                     json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "posts": items}},
                 )
 
             with client.LofterClient("cookie", transport=handler, min_interval=0, budget=None) as api:
-                page0 = api.get_following_posts(limit=5, offset=0)
-                page1 = api.get_following_posts(limit=5, offset=5)
-                page2 = api.get_following_posts(limit=5, offset=10)
-            self.assertEqual(len(page0), 5)
-            self.assertEqual(len(page1), 5)
-            self.assertEqual(len(page2), 5)
-            ids = [post.post_id for post in page0 + page1 + page2]
-            self.assertEqual(len(ids), len(set(ids)))
+                blogs = api.get_following(limit=10, offset=0)
+                posts = api.get_following_blog_posts("12", limit=3, offset=0)
+            self.assertEqual(blogs[0].blog_id, "12")
+            self.assertEqual(len(posts), 3)
+            self.assertEqual(posts[0].post_id, "100")
         finally:
             if config.CONFIG_PATH.exists():
                 config.CONFIG_PATH.unlink()

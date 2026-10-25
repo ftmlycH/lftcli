@@ -49,9 +49,10 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "示例:\n"
             "  lofter> tag 原创小说 --limit 5\n"
+            "  lofter> following\n"
+            "  lofter> following 123456 --limit 10\n"
             "  lofter> random 原创小说 --count 3\n"
             "  lofter> recommend 3\n"
-            "  lofter> post 123456\n"
             "  lofter> exit\n"
         ),
     )
@@ -83,7 +84,15 @@ def _build_parser() -> argparse.ArgumentParser:
     collections.set_defaults(func=_collections)
 
     _command(commands, "mine", "我发布的文字", _paged(client.get_my_posts, _show_posts), 20)
-    _command(commands, "following", "关注的人发布的文字", _paged(client.get_following_posts, _show_posts), 20)
+
+    following = commands.add_parser("following", help="关注列表；加博主 ID/名列出其小说")
+    following.add_argument("blog", nargs="?", help="博主 ID 或 blogName")
+    _add_page_args(following, limit=20)
+    following.set_defaults(func=_following)
+    # 兼容复数写法，行为与不加 ID 的 following 相同。
+    followings = commands.add_parser("followings", help="关注列表（同 following）")
+    _add_page_args(followings, limit=20)
+    followings.set_defaults(func=_followings)
 
     _command(commands, "likes", "我喜欢的文章", _paged(client.get_likes, _show_posts), 20)
     _command(commands, "history", "浏览记录", _paged(client.get_history, _show_posts), 20)
@@ -251,6 +260,26 @@ def _collections(args, cookie: str) -> None:
         limit=args.limit,
         offset=args.offset,
         order=args.order,
+    )
+    _show_posts(posts, empty_message=hint)
+
+
+def _followings(args, cookie: str) -> None:
+    hint = "（没有更多了）" if args.offset > 0 else "（这里暂时没有内容）"
+    rows = client.get_following(cookie, limit=args.limit, offset=args.offset)
+    output.print_blog_list(rows, empty_message=hint)
+
+
+def _following(args, cookie: str) -> None:
+    hint = "（没有更多了）" if args.offset > 0 else "（这里暂时没有内容）"
+    if not getattr(args, "blog", None):
+        _followings(args, cookie)
+        return
+    posts = client.get_following_blog_posts(
+        cookie,
+        args.blog,
+        limit=args.limit,
+        offset=args.offset,
     )
     _show_posts(posts, empty_message=hint)
 

@@ -35,6 +35,17 @@ def print_collection_list(collections, *, empty_message: str = "（没有更多�
         print(f"[{item.collection_id}] {name} · {author} · {tail}")
 
 
+def print_blog_list(blogs, *, empty_message: str = "（没有更多了）") -> None:
+    if not blogs:
+        print(empty_message)
+        return
+    for blog in blogs:
+        name = _single_line(getattr(blog, "name", "") or "")
+        nickname = _single_line(getattr(blog, "nickname", "") or name or "未知")
+        blog_id = getattr(blog, "blog_id", "") or ""
+        print(f"[{blog_id}] {nickname} · {name}")
+
+
 def print_article(post) -> None:
     title = _single_line(getattr(post, "title", "") or "无标题")
     author = _single_line(getattr(post, "author", "") or "未知")

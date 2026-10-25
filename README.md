@@ -51,7 +51,8 @@ sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 | `cookie` | 查看、保存或删除 Cookie |
 | `collections [id]` | 订阅的合集。带 ID 则列出其中的文章，默认从旧到新 |
 | `mine` | 我发布的文字 |
-| `following` | 关注的人发布的文字 |
+| `following [id]` | 关注列表。带博主 ID/名则列出其文字小说 |
+| `followings` | 同 `following` 列表 |
 | `likes` | 我喜欢的文章 |
 | `history` | 浏览过的文章 |
 | `tag <tag> [--sort hot\|new\|month]` | 标签检索。`hot` 总热度，`new` 最新，`month` 月榜 |
