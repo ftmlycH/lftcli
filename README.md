@@ -17,7 +17,7 @@ cd lftcli
 | --- | --- |
 | Windows | [python.org](https://www.python.org/downloads/windows/)，勾选 Add python.exe to PATH。没有 `python3` 时用 `py -3` |
 | macOS | `brew install python`，或使用系统 / python.org 的 `python3` |
-| Linux | Debian、Ubuntu 用下方 deb。Fedora、RHEL 用下方 rpm。Arch：`sudo pacman -S python` |
+| Linux | Debian、Ubuntu 用下方 deb。Fedora、RHEL 用下方 rpm。 |
 | FreeBSD、DragonFly | `pkg install python3` |
 | OpenBSD | `pkg_add python3` |
 | NetBSD | `pkgin install python312`，之后用 `python3.12` |
@@ -29,7 +29,7 @@ python3 packaging/build_deb.py
 sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 ```
 
-Fedora、Arch系可以用rpm包下载
+Fedora系可以用rpm包下载
 
 ```bash
 python3 packaging/build_rpm.py
