@@ -22,21 +22,19 @@ cd lftcli
 | OpenBSD | `pkg_add python3` |
 | NetBSD | `pkgin install python312`，之后用 `python3.12` |
 
-Debian、Ubuntu 不用 apt：
+Debian、Ubuntu系可以用deb包下载
 
 ```bash
 python3 packaging/build_deb.py
 sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 ```
 
-Fedora、RHEL：
+Fedora、Arch系可以用rpm包下载
 
 ```bash
 python3 packaging/build_rpm.py
 sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 ```
-
-BSD 不用这两种包。
 
 配置文件：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，其他系统是 `~/.lofter-cli/config.json`。
 
