@@ -12,6 +12,8 @@ INDEX_PATH = CONFIG_DIR / "posts.json"
 ENV_COOKIE = "LOFTER_COOKIE"
 _INDEX_LIMIT = 2000
 _COOKIE_MAX = 16384
+# config.json 只保留 cookie，避免历史缓存字段把文件写坏。
+_CONFIG_KEYS = frozenset({"cookie"})
 
 
 class ConfigError(RuntimeError):
@@ -47,14 +49,7 @@ def require_cookie() -> str:
 def save_cookie(cookie: str) -> str:
     value = normalize_cookie(cookie)
     _reject_header_unsafe(value)
-    data = _read_config()
-    data["cookie"] = value
-    data.pop("blog_domain", None)
-    data.pop("favorite_tags", None)
-    data.pop("tag_depths", None)
-    data.pop("following_blogs", None)
-    data.pop("following_posts", None)
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    _atomic_write(CONFIG_PATH, json.dumps({"cookie": value}, ensure_ascii=False, indent=2) + "\n")
     if os.name != "nt":
         try:
             os.chmod(CONFIG_PATH, 0o600)
@@ -65,131 +60,20 @@ def save_cookie(cookie: str) -> str:
 
 def clear_cookie() -> bool:
     data = _read_config()
-    changed = False
-    for key in ("cookie", "blog_domain", "favorite_tags", "tag_depths", "following_blogs", "following_posts"):
-        if key in data:
-            del data[key]
-            changed = True
-    if not changed:
+    if "cookie" not in data:
+        # 顺带清掉历史残留字段。
+        if CONFIG_PATH.is_file():
+            try:
+                CONFIG_PATH.unlink()
+            except OSError:
+                return False
+            return True
         return False
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    try:
+        CONFIG_PATH.unlink()
+    except OSError:
+        _atomic_write(CONFIG_PATH, "{}\n")
     return True
-
-
-def load_blog_domain() -> str | None:
-    data = _read_config()
-    value = data.get("blog_domain") if isinstance(data, dict) else None
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def save_blog_domain(domain: str) -> None:
-    text = str(domain or "").strip()
-    if not text:
-        return
-    data = _read_config()
-    if data.get("blog_domain") == text:
-        return
-    data["blog_domain"] = text
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-
-def load_favorite_tags() -> list[str]:
-    data = _read_config()
-    value = data.get("favorite_tags") if isinstance(data, dict) else None
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def save_favorite_tags(tags: list[str]) -> None:
-    cleaned = [str(tag).strip() for tag in tags if str(tag).strip()]
-    data = _read_config()
-    if data.get("favorite_tags") == cleaned:
-        return
-    data["favorite_tags"] = cleaned
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-
-def load_tag_depth(tag: str, sort: str) -> int | None:
-    data = _read_config()
-    depths = data.get("tag_depths") if isinstance(data, dict) else None
-    if not isinstance(depths, dict):
-        return None
-    value = depths.get(f"{tag}|{sort}")
-    try:
-        depth = int(value)
-    except (TypeError, ValueError):
-        return None
-    return depth if depth > 0 else None
-
-
-def save_tag_depth(tag: str, sort: str, depth: int) -> None:
-    try:
-        value = int(depth)
-    except (TypeError, ValueError):
-        return
-    if value <= 0:
-        return
-    data = _read_config()
-    depths = data.get("tag_depths")
-    if not isinstance(depths, dict):
-        depths = {}
-    key = f"{tag}|{sort}"
-    if depths.get(key) == value:
-        return
-    depths[key] = value
-    data["tag_depths"] = depths
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-
-def load_following_blogs() -> list[dict]:
-    data = _read_config()
-    rows = data.get("following_blogs") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return []
-    found: list[dict] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        blog_id = str(row.get("blog_id") or "").strip()
-        name = str(row.get("name") or "").strip()
-        if not blog_id or not name:
-            continue
-        found.append(
-            {
-                "blog_id": blog_id,
-                "name": name,
-                "nickname": str(row.get("nickname") or name).strip() or name,
-                "url": str(row.get("url") or "").strip(),
-            }
-        )
-    return found
-
-
-def save_following_blogs(blogs) -> None:
-    rows: list[dict] = []
-    for blog in blogs:
-        blog_id = str(getattr(blog, "blog_id", "") or "").strip()
-        name = str(getattr(blog, "name", "") or "").strip()
-        if not blog_id or not name:
-            continue
-        rows.append(
-            {
-                "blog_id": blog_id,
-                "name": name,
-                "nickname": str(getattr(blog, "nickname", "") or name).strip() or name,
-                "url": str(getattr(blog, "url", "") or "").strip(),
-            }
-        )
-        if len(rows) >= 80:
-            break
-    data = _read_config()
-    if data.get("following_blogs") == rows:
-        return
-    data["following_blogs"] = rows
-    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def cookie_status_lines() -> list[str]:
@@ -274,14 +158,19 @@ def _read_config() -> dict:
     if not CONFIG_PATH.is_file():
         return {}
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+        raw = CONFIG_PATH.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
     except OSError as exc:
         raise ConfigError(f"无法读取 {CONFIG_PATH}：{exc}") from exc
     except json.JSONDecodeError as exc:
-        raise ConfigError(f"无法解析 {CONFIG_PATH}：{exc}") from exc
+        raise ConfigError(
+            f"无法解析 {CONFIG_PATH}：{exc}。可运行 lftcli cookie clear 后重新 cookie set。"
+        ) from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{CONFIG_PATH} 的内容不是对象。")
-    return data
+    # 只暴露 cookie；其它历史缓存字段一律忽略。
+    cookie = data.get("cookie")
+    return {"cookie": cookie} if isinstance(cookie, str) else {}
 
 
 def remember_posts(posts) -> None:
@@ -340,7 +229,6 @@ def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     try:
-        # 清理孤立代理项，避免 Windows 下 utf-8 编码失败。
         safe = text.encode("utf-8", "replace").decode("utf-8")
         tmp.write_text(safe, encoding="utf-8", newline="\n")
         tmp.replace(path)

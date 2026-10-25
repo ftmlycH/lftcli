@@ -182,7 +182,7 @@ class CommandTests(unittest.TestCase):
         secret = "phone-token-0123456789"
         with tempfile.TemporaryDirectory() as directory:
             config.CONFIG_PATH = Path(directory) / "config.json"
-            config.CONFIG_PATH.write_text('{"keep": true}\n', encoding="utf-8")
+            config.CONFIG_PATH.write_text('{"keep": true, "junk": []}\n', encoding="utf-8")
 
             def boom(*_args, **_kwargs):
                 raise AssertionError("不应发起网络请求")
@@ -207,8 +207,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn("长度", shown)
             self.assertIn("当前生效：配置文件", shown)
             saved = json.loads(config.CONFIG_PATH.read_text(encoding="utf-8"))
-            self.assertEqual(saved["cookie"], secret)
-            self.assertTrue(saved["keep"])
+            self.assertEqual(saved, {"cookie": secret})
 
     def test_cookie_set_keeps_file_when_login_is_rejected(self):
         secret = "rejected-token-012345"
@@ -492,88 +491,84 @@ class ClientTests(unittest.TestCase):
                 config.CONFIG_PATH.unlink()
             config.CONFIG_PATH = original
 
-    def test_recommend_samples_from_cached_liked_tag(self):
+    def test_recommend_samples_from_live_liked_tag(self):
         calls = {"tags": [], "account": 0}
-        original = config.CONFIG_PATH
-        config.CONFIG_PATH = Path(tempfile.gettempdir()) / "lofter-cli-recommend-test.json"
-        try:
-            if config.CONFIG_PATH.exists():
-                config.CONFIG_PATH.unlink()
-            config.save_favorite_tags(["乙"])
 
-            def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-                url = request.url.full
-                if "usercounts" in url:
-                    calls["account"] += 1
-                    return client.HTTPResponse(200, json={"meta": {"status": 200, "msg": ""}, "response": {}})
-                tag = request.url.params.get("tag", "")
-                calls["tags"].append(tag)
-                items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(20)]
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            url = request.url.full
+            if "usercounts" in url:
+                calls["account"] += 1
                 return client.HTTPResponse(
                     200,
-                    json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
+                    json={
+                        "meta": {"status": 200, "msg": ""},
+                        "response": {"manageTags": ["乙"]},
+                    },
                 )
+            tag = request.url.params.get("tag", "")
+            calls["tags"].append(tag)
+            items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(20)]
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
+            )
 
-            class Rng:
-                def randrange(self, n):
-                    return 0
+        class Rng:
+            def randrange(self, n):
+                return 0
 
-                def shuffle(self, items):
-                    return None
+            def shuffle(self, items):
+                return None
 
-                def sample(self, population, count):
-                    return list(population)[:count]
+            def sample(self, population, count):
+                return list(population)[:count]
 
-            with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-                posts = api.recommend(1, rng=Rng())
-            self.assertEqual(len(posts), 1)
-            self.assertTrue(all(tag == "乙" for tag in calls["tags"]))
-            self.assertEqual(calls["account"], 0)
-        finally:
-            if config.CONFIG_PATH.exists():
-                config.CONFIG_PATH.unlink()
-            config.CONFIG_PATH = original
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.recommend(1, rng=Rng())
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(all(tag == "乙" for tag in calls["tags"]))
+        self.assertEqual(calls["account"], 1)
 
     def test_recommend_one_network_call_per_item(self):
-        calls = {"n": 0, "i": 0}
-        original = config.CONFIG_PATH
-        config.CONFIG_PATH = Path(tempfile.gettempdir()) / "lofter-cli-recommend-once.json"
-        try:
-            if config.CONFIG_PATH.exists():
-                config.CONFIG_PATH.unlink()
-            config.save_favorite_tags(["甲", "乙", "丙", "丁"])
+        calls = {"n": 0, "i": 0, "account": 0}
 
-            def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-                calls["n"] += 1
-                calls["i"] += 1
-                items = [_item(post_id=10 + calls["i"] * 10 + i, title=f"文{i}") for i in range(12)]
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            if "usercounts" in request.url.full:
+                calls["account"] += 1
                 return client.HTTPResponse(
                     200,
-                    json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
+                    json={
+                        "meta": {"status": 200, "msg": ""},
+                        "response": {"manageTags": ["甲", "乙", "丙", "丁"]},
+                    },
                 )
+            calls["n"] += 1
+            calls["i"] += 1
+            items = [_item(post_id=10 + calls["i"] * 10 + i, title=f"文{i}") for i in range(12)]
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
+            )
 
-            class Rng:
-                def __init__(self):
-                    self.n = 0
+        class Rng:
+            def __init__(self):
+                self.n = 0
 
-                def randrange(self, n):
-                    self.n += 1
-                    return self.n % max(n, 1)
+            def randrange(self, n):
+                self.n += 1
+                return self.n % max(n, 1)
 
-                def sample(self, population, count):
-                    return list(population)[:count]
+            def sample(self, population, count):
+                return list(population)[:count]
 
-                def shuffle(self, items):
-                    return None
+            def shuffle(self, items):
+                return None
 
-            with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-                posts = api.recommend(3, rng=Rng())
-            self.assertEqual(len(posts), 3)
-            self.assertGreaterEqual(calls["n"], 3)
-        finally:
-            if config.CONFIG_PATH.exists():
-                config.CONFIG_PATH.unlink()
-            config.CONFIG_PATH = original
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.recommend(3, rng=Rng())
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(calls["account"], 1)
+        self.assertGreaterEqual(calls["n"], 3)
 
     def test_history_offset_keeps_paging_when_page_shorter_than_cap(self):
         calls = {"offsets": []}

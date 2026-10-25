@@ -36,7 +36,7 @@ python3 packaging/build_rpm.py
 sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 ```
 
-配置文件：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，其他系统是 `~/.lofter-cli/config.json`。
+配置文件只存 Cookie：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，其他系统是 `~/.lofter-cli/config.json`。阅读目录另存 `posts.json`。
 
 ## Cookie
 
@@ -63,4 +63,4 @@ sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 
 ## 说明
 
-地址和参数只在 `src/lftcli/client.py`。超时 10 秒，相邻请求至少间隔 0.03 秒，连接失败、超时和 HTTP 429 / 5xx 最多试 3 次。接口不是官方的，付费或仅自己可见的正文可能拿不到。不支持图片。
+地址和参数只在 `src/lftcli/client.py`。单次请求超时约 8 秒，一条命令总预算约 15 秒；相邻请求至少间隔 0.03 秒，连接失败、超时和 HTTP 429 / 5xx 最多试 3 次。接口不是官方的，付费或仅自己可见的正文可能拿不到。不支持图片。

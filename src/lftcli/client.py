@@ -39,18 +39,17 @@ TAG_PAGE_SIZE = 20
 TAG_CURSOR_STEP = 12
 MAX_PICKS = 5
 SAMPLE_POOL = 12
-# 未知标签深度时的默认/最大 API 游标（约页数 * 12）。
+# 随机抽样固定游标上界（约页数 * 12），不落盘、不自适应。
 TAG_DEPTH_DEFAULT = 600
-TAG_DEPTH_MAX = 12000
 NOVEL_TYPE = 1
 # 标签流里筛小说，避免热门页被图片占满后空翻十几页。
 TAG_POST_TYPES = str(NOVEL_TYPE)
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
 
-TIMEOUT_SECONDS = 7.0
-# 单条 CLI 指令总预算，保证慢网下也不拖过约 8 秒。
-COMMAND_BUDGET_SECONDS = 7.5
+TIMEOUT_SECONDS = 8.0
+# 单条 CLI 指令总预算：列表/随机/推荐可到约 15 秒，不再依赖磁盘缓存。
+COMMAND_BUDGET_SECONDS = 15.0
 MIN_INTERVAL_SECONDS = 0.03
 MAX_ATTEMPTS = 3
 PAGE_CAP = 40
@@ -156,6 +155,8 @@ class LofterClient:
         self._transport = transport
         self._budget = budget
         self._started = time.monotonic()
+        self._domain: str | None = None
+        self._favorite_tags: list[str] | None = None
 
     def close(self) -> None:
         return None
@@ -267,8 +268,6 @@ class LofterClient:
                         break
                 if len(found) >= limit:
                     break
-            if found:
-                _remember_tag_depth(name, sort, origin + len(found))
             return found[:limit]
         return self._search_tag_sequential(name, sort, api_sort, origin, limit, pages)
 
@@ -285,7 +284,6 @@ class LofterClient:
         seen: set[str] = set()
         cursor = origin
         before: int | None = None
-        last_next: int | None = None
         for _ in range(pages):
             if len(found) >= limit:
                 break
@@ -334,7 +332,6 @@ class LofterClient:
                     raise ApiError("文章数据结构异常，请只更新 client.py。")
                 break
             next_cursor = _as_int(data.get("offset"))
-            last_next = next_cursor
             if oldest is not None and before is not None and oldest >= before and api_sort == "new":
                 if next_cursor is None or next_cursor <= cursor:
                     break
@@ -343,8 +340,6 @@ class LofterClient:
             if next_cursor is None or next_cursor <= cursor:
                 break
             cursor = next_cursor
-        if last_next is not None and last_next > origin:
-            _remember_tag_depth(name, sort, last_next)
         return found[:limit]
 
     def get_post(self, post_id_or_url: str) -> Post:
@@ -491,24 +486,7 @@ class LofterClient:
             )
             return _parse_following(text)
 
-        blogs = _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
-        if blogs and offset == 0:
-            # 合并进本地缓存，供 following <id> 解析博主名。
-            known: dict[str, Blog] = {}
-            for row in config.load_following_blogs():
-                blog_id = str(row.get("blog_id") or "")
-                name = str(row.get("name") or "")
-                if blog_id and name:
-                    known[blog_id] = Blog(
-                        blog_id=blog_id,
-                        name=name,
-                        nickname=str(row.get("nickname") or name),
-                        url=str(row.get("url") or ""),
-                    )
-            for blog in blogs:
-                known[blog.blog_id] = blog
-            config.save_following_blogs(list(known.values()))
-        return blogs
+        return _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
 
     def get_following_blog_posts(self, blog_key: str, limit: int = 20, offset: int = 0) -> list[Post]:
         """按关注博主 ID / blogName 列出其文字小说。"""
@@ -521,44 +499,59 @@ class LofterClient:
         key = str(blog_key or "").strip()
         if not key:
             raise ApiError("请提供关注博主的 ID 或 blogName。")
-        if key.isdigit():
-            for row in config.load_following_blogs():
-                if str(row.get("blog_id")) == key and row.get("name"):
-                    return str(row["name"])
-            # 缓存没有时扫一页关注列表。
-            for blog in self.get_following(limit=50, offset=0):
+        if not key.isdigit():
+            return key
+        # 现场翻关注列表解析 ID → blogName，不落盘。
+        cursor = 0
+        page = 50
+        while self._remaining() >= 0.8:
+            blogs = self.get_following(limit=page, offset=cursor)
+            if not blogs:
+                break
+            for blog in blogs:
                 if blog.blog_id == key:
                     return blog.name
-            raise ApiError("关注列表里找不到这个 ID。先运行 following 查看名单。")
-        return key
+            if len(blogs) < page:
+                break
+            cursor += page
+            if cursor >= 300:
+                break
+        raise ApiError("关注列表里找不到这个 ID。先运行 following 查看名单。")
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """在标签全文小说流上系统熵选游标，真随机抽取。"""
+        """在固定深度窗口内系统熵选游标，真随机抽取；空窗则回落首页。"""
         _check_picks(count)
         rng = rng or _SYSTEM_RNG
         posts = self._sample_from_tag(tag, count, sort, rng)
         if posts or count != 1 or self._remaining() < 0.5:
             return posts
-        # 深窗未命中时，保底再取榜首一页，仍只多 1 次请求。
         pool = self._fetch_tag_window(tag.strip(), sort, 0)
         return _pick(pool, 1, rng)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """随机选 count 个喜欢的标签，各在标签全文小说流里真随机抽 1 篇。"""
+        """现场拉喜欢标签，随机选 count 个，各在小说流里真随机抽 1 篇。"""
         _check_picks(count)
         rng = rng or _SYSTEM_RNG
-        # 只用本地缓存的喜欢标签，避免再打账号接口把耗时翻倍；缓存由 history 等写入。
-        liked = _unique_tags(config.load_favorite_tags()) or list(FALLBACK_HOT_TAGS)
+        liked = self.get_favorite_tags() or list(FALLBACK_HOT_TAGS)
         if not liked:
             return []
-        # 一次并行多取 1～2 个标签，降低空窗导致篇数不足的概率。
         wave = min(len(liked), count + (1 if count < MAX_PICKS else 0))
         tags = _pick_recommend_tags(liked, wave, rng)
         found = self._sample_tags_parallel(tags, "new", rng)
+        if len(found) < count and self._remaining() > 1.0:
+            extra = _pick_recommend_tags(liked, count - len(found), rng)
+            more = self._sample_tags_parallel(extra, "new", rng)
+            seen = {post.post_id for post in found}
+            for post in more:
+                if post.post_id in seen:
+                    continue
+                found.append(post)
+                if len(found) >= count:
+                    break
         return found[:count]
 
     def _sample_from_tag(self, tag: str, count: int, sort: str, rng) -> list[Post]:
-        """按标签深度缓存做全域游标抽样；count>1 时并行多窗再合并。"""
+        """固定采样深度内并行多窗；不足时补首页。"""
         if sort not in SORT_TO_API:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
@@ -567,7 +560,7 @@ class LofterClient:
         if count == 1:
             post = self._sample_one_from_tag(name, sort, rng)
             return [post] if post else []
-        starts = _random_tag_starts(name, sort, count, rng)
+        starts = _random_tag_starts(count, rng)
         pools = self._fetch_tag_windows_parallel(name, sort, starts)
         pool: list[Post] = []
         seen: set[str] = set()
@@ -587,16 +580,19 @@ class LofterClient:
         return _pick(pool, count, rng)
 
     def _sample_one_from_tag(self, tag: str, sort: str, rng) -> Post | None:
-        """只打 1 次标签页请求，避免二次回落把耗时打到 8 秒外。"""
-        depth = _tag_depth(tag, sort)
-        pages = max(1, depth // TAG_CURSOR_STEP)
+        """随机一窗；空则在预算内再试一次更浅的游标或首页。"""
+        pages = max(1, TAG_DEPTH_DEFAULT // TAG_CURSOR_STEP)
         if self._remaining() < 0.3:
             return None
         start = rng.randrange(pages) * TAG_CURSOR_STEP
         pool = self._fetch_tag_window(tag, sort, start)
-        if not pool and start != 0:
-            _shrink_tag_depth(tag, sort, start)
-            return None
+        if not pool and start != 0 and self._remaining() > 0.5:
+            # 深窗常为空：再掷一次浅窗，仍不够则首页。
+            shallow = max(1, pages // 4)
+            start2 = rng.randrange(shallow) * TAG_CURSOR_STEP
+            pool = self._fetch_tag_window(tag, sort, start2) if start2 else self._fetch_tag_window(tag, sort, 0)
+            if not pool and start2 != 0 and self._remaining() > 0.5:
+                pool = self._fetch_tag_window(tag, sort, 0)
         if not pool:
             return None
         picked = _pick(pool, 1, rng)
@@ -656,30 +652,35 @@ class LofterClient:
         return [batch or [] for batch in results]
 
     def _fetch_tag_window(self, tag: str, sort: str, start: int) -> list[Post]:
-        pool = self.search_tag(
+        return self.search_tag(
             tag, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=1, start_cursor=start
         )
-        if pool:
-            _expand_tag_depth(tag, sort, start + max(len(pool), TAG_CURSOR_STEP))
-        elif start > 0:
-            _shrink_tag_depth(tag, sort, start)
-        return pool
 
     def _child_client(self) -> LofterClient:
-        return LofterClient(
+        child = LofterClient(
             self._cookie,
             transport=self._transport,
             min_interval=self._min_interval,
             max_attempts=self._max_attempts,
             budget=max(0.5, self._remaining()),
         )
+        # 同进程内复用已解析的域名 / 喜欢标签，仍不写磁盘。
+        child._domain = self._domain
+        child._favorite_tags = self._favorite_tags
+        return child
 
     def get_favorite_tags(self) -> list[str]:
+        if self._favorite_tags is not None:
+            return list(self._favorite_tags)
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
         tags = _tags_from_account(payload)
-        if tags:
-            config.save_favorite_tags(tags)
-        return tags
+        self._favorite_tags = tags
+        # 顺带记下域名，省掉 history/mine 再打一次账号接口。
+        if self._domain is None:
+            domain = _domain_from_account(payload)
+            if domain:
+                self._domain = domain
+        return list(tags)
 
     def get_hot_tags(self) -> list[str]:
         try:
@@ -703,32 +704,16 @@ class LofterClient:
         return tags or list(FALLBACK_HOT_TAGS)
 
     def _blog_domain(self) -> str:
-        cached = config.load_blog_domain()
-        if cached:
-            return cached
+        if self._domain:
+            return self._domain
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
-        data = _expect_response(payload)
         tags = _tags_from_account(payload)
-        if tags:
-            config.save_favorite_tags(tags)
-        candidates: list[str] = []
-        blogs = data.get("blogs") or []
-        if isinstance(blogs, list):
-            for blog in blogs:
-                if not isinstance(blog, dict):
-                    continue
-                info = blog.get("blogInfo") if isinstance(blog.get("blogInfo"), dict) else blog
-                candidates.append(str(info.get("homePageUrl") or ""))
-                name = info.get("blogName")
-                if name:
-                    candidates.append(f"{name}.lofter.com")
-        info = data.get("blogInfo") if isinstance(data.get("blogInfo"), dict) else {}
-        candidates.append(str(info.get("homePageUrl") or ""))
-        for raw in candidates:
-            domain = _domain(raw)
-            if domain:
-                config.save_blog_domain(domain)
-                return domain
+        if tags and self._favorite_tags is None:
+            self._favorite_tags = tags
+        domain = _domain_from_account(payload)
+        if domain:
+            self._domain = domain
+            return domain
         raise ApiError("读不到当前账号的博客域名，浏览记录接口需要它。")
 
     def _request(self, method: str, url: str, **kwargs) -> dict:
@@ -1509,35 +1494,30 @@ def _pick_recommend_tags(liked: list[str], count: int, rng) -> list[str]:
     return picked
 
 
-def _tag_depth(tag: str, sort: str) -> int:
-    cached = config.load_tag_depth(tag, sort)
-    if cached:
-        return min(TAG_DEPTH_MAX, max(TAG_CURSOR_STEP, cached))
-    return TAG_DEPTH_DEFAULT
+def _domain_from_account(payload: dict) -> str | None:
+    data = _expect_response(payload) if isinstance(payload, dict) else {}
+    candidates: list[str] = []
+    blogs = data.get("blogs") or []
+    if isinstance(blogs, list):
+        for blog in blogs:
+            if not isinstance(blog, dict):
+                continue
+            info = blog.get("blogInfo") if isinstance(blog.get("blogInfo"), dict) else blog
+            candidates.append(str(info.get("homePageUrl") or ""))
+            name = info.get("blogName")
+            if name:
+                candidates.append(f"{name}.lofter.com")
+    info = data.get("blogInfo") if isinstance(data.get("blogInfo"), dict) else {}
+    candidates.append(str(info.get("homePageUrl") or ""))
+    for raw in candidates:
+        domain = _domain(raw)
+        if domain:
+            return domain
+    return None
 
 
-def _remember_tag_depth(tag: str, sort: str, cursor: int) -> None:
-    if cursor <= 0:
-        return
-    current = config.load_tag_depth(tag, sort) or TAG_DEPTH_DEFAULT
-    config.save_tag_depth(tag, sort, min(TAG_DEPTH_MAX, max(current, cursor)))
-
-
-def _expand_tag_depth(tag: str, sort: str, cursor: int) -> None:
-    _remember_tag_depth(tag, sort, cursor + TAG_CURSOR_STEP * 20)
-
-
-def _shrink_tag_depth(tag: str, sort: str, empty_at: int) -> None:
-    if empty_at <= TAG_CURSOR_STEP:
-        return
-    current = config.load_tag_depth(tag, sort) or TAG_DEPTH_DEFAULT
-    narrowed = max(TAG_CURSOR_STEP, min(current, empty_at))
-    config.save_tag_depth(tag, sort, narrowed)
-
-
-def _random_tag_starts(tag: str, sort: str, count: int, rng) -> list[int]:
-    depth = _tag_depth(tag, sort)
-    pages = max(1, depth // TAG_CURSOR_STEP)
+def _random_tag_starts(count: int, rng) -> list[int]:
+    pages = max(1, TAG_DEPTH_DEFAULT // TAG_CURSOR_STEP)
     starts: list[int] = []
     seen: set[int] = set()
     for _ in range(count * 3):
