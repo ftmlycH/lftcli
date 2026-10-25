@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from . import config
@@ -38,8 +39,11 @@ TAG_PAGE_SIZE = 20
 TAG_CURSOR_STEP = 12
 MAX_PICKS = 5
 SAMPLE_POOL = 12
-# 随机抽样：在前 N 个接口页里用系统熵选起点，且只打 1 页。
-SAMPLE_START_PAGES = 80
+# 未知标签深度时的默认/最大 API 游标（约页数 * 12）。
+TAG_DEPTH_DEFAULT = 600
+TAG_DEPTH_MAX = 12000
+# 关注流：按博主稳定顺序翻页时，估计每人首页小说数。
+FOLLOW_NOVELS_PER_BLOG = 8
 NOVEL_TYPE = 1
 # 标签流里筛小说，避免热门页被图片占满后空翻十几页。
 TAG_POST_TYPES = str(NOVEL_TYPE)
@@ -245,15 +249,49 @@ class LofterClient:
         if start_cursor < 0:
             raise ApiError("起始游标不能是负数。")
 
-        need = offset + limit
-        # 有 postTypes 后通常 1 页就够；默认最多 2 页，守住指令耗时预算。
-        pages = max_pages if max_pages is not None else min(2, max(1, (need + TAG_CURSOR_STEP - 1) // TAG_CURSOR_STEP))
+        # postTypes=1 后 API offset 约等于小说偏移；从目标 offset 起跳，只取 limit 篇。
+        origin = start_cursor if start_cursor else offset
+        pages = max_pages if max_pages is not None else min(
+            50, max(1, (limit + TAG_CURSOR_STEP - 1) // TAG_CURSOR_STEP)
+        )
+        if pages > 1 and self._transport is None:
+            starts = [origin + index * TAG_CURSOR_STEP for index in range(pages)]
+            batches = self._fetch_tag_windows_parallel(name, sort, starts)
+            found: list[Post] = []
+            seen: set[str] = set()
+            for batch in batches:
+                for post in batch:
+                    if post.post_id in seen:
+                        continue
+                    seen.add(post.post_id)
+                    found.append(post)
+                    if len(found) >= limit:
+                        break
+                if len(found) >= limit:
+                    break
+            if found:
+                _remember_tag_depth(name, sort, origin + len(found))
+            return found[:limit]
+        return self._search_tag_sequential(name, sort, api_sort, origin, limit, pages)
+
+    def _search_tag_sequential(
+        self,
+        name: str,
+        sort: str,
+        api_sort: str,
+        origin: int,
+        limit: int,
+        pages: int,
+    ) -> list[Post]:
         found: list[Post] = []
         seen: set[str] = set()
-        cursor = start_cursor
+        cursor = origin
         before: int | None = None
+        last_next: int | None = None
         for _ in range(pages):
-            if len(found) >= need:
+            if len(found) >= limit:
+                break
+            if self._remaining() < 0.25:
                 break
             payload = self._request(
                 "POST",
@@ -298,6 +336,7 @@ class LofterClient:
                     raise ApiError("文章数据结构异常，请只更新 client.py。")
                 break
             next_cursor = _as_int(data.get("offset"))
+            last_next = next_cursor
             if oldest is not None and before is not None and oldest >= before and api_sort == "new":
                 if next_cursor is None or next_cursor <= cursor:
                     break
@@ -306,7 +345,9 @@ class LofterClient:
             if next_cursor is None or next_cursor <= cursor:
                 break
             cursor = next_cursor
-        return found[offset : offset + limit]
+        if last_next is not None and last_next > origin:
+            _remember_tag_depth(name, sort, last_next)
+        return found[:limit]
 
     def get_post(self, post_id_or_url: str) -> Post:
         blog_id, post_id = _resolve_post(post_id_or_url)
@@ -455,69 +496,226 @@ class LofterClient:
         return _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
 
     def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
+        """关注小说流：重建时并行拉帖并缓存，翻页直接切缓存，保证可翻完且 <8s。"""
         _check_window(limit, offset)
         need = offset + limit
-        # 关注列表后，在预算内随机试几个博主各一页并凑齐 need。
-        blogs = self.get_following(limit=min(12, max(need, 4)), offset=0)
+        cached_posts = [_post_from_cache(row) for row in config.load_following_posts()]
+        if offset == 0 or need > len(cached_posts):
+            cached_posts = self._rebuild_following_posts(need)
+        return cached_posts[offset : offset + limit]
+
+    def _rebuild_following_posts(self, need: int) -> list[Post]:
+        blog_limit = min(80, max(16, (need // FOLLOW_NOVELS_PER_BLOG) + 10))
+        blogs = [
+            Blog(
+                blog_id=str(row["blog_id"]),
+                name=str(row["name"]),
+                nickname=str(row.get("nickname") or row["name"]),
+                url=str(row.get("url") or ""),
+            )
+            for row in config.load_following_blogs()
+        ]
         if not blogs:
+            blogs = self.get_following(limit=blog_limit, offset=0)
+            if blogs:
+                config.save_following_blogs(blogs)
+        if not blogs:
+            config.save_following_posts([])
             return []
-        order = list(blogs)
-        _SYSTEM_RNG.shuffle(order)
+        blogs = sorted(blogs, key=lambda blog: (blog.blog_id, blog.name))
+        prefetched = self._prefetch_following_posts(blogs[: min(len(blogs), 20)], max(need, 40))
         found: list[Post] = []
         seen: set[str] = set()
-        for blog in order[:5]:
-            if len(found) >= need or self._remaining() < 0.5:
-                break
-            try:
-                batch = self.get_blog_posts(blog.name, limit=max(need, 8), offset=0, max_pages=1)
-            except ApiError:
-                continue
+        for blog in blogs:
+            batch = prefetched.get(blog.blog_id) or []
             for post in batch:
                 if post.post_id in seen:
                     continue
                 seen.add(post.post_id)
                 found.append(post)
-                if len(found) >= need:
-                    break
-        return found[offset : offset + limit]
+        config.save_following_posts(found)
+        return found
+
+    def _prefetch_following_posts(self, blogs: list[Blog], need: int) -> dict[str, list[Post]]:
+        if not blogs:
+            return {}
+        ordered = sorted(blogs, key=lambda blog: (blog.blog_id, blog.name))
+        take = min(len(ordered), max(3, (need // FOLLOW_NOVELS_PER_BLOG) + 3))
+        targets = ordered[:take]
+        if self._transport is not None or len(targets) == 1:
+            out: dict[str, list[Post]] = {}
+            for blog in targets:
+                try:
+                    out[blog.blog_id] = self.get_blog_posts(
+                        blog.name, limit=max(need, FOLLOW_NOVELS_PER_BLOG), offset=0, max_pages=1
+                    )
+                except ApiError:
+                    out[blog.blog_id] = []
+            return out
+
+        def job(blog: Blog):
+            child = self._child_client()
+            with child:
+                try:
+                    posts = child.get_blog_posts(
+                        blog.name, limit=max(need, FOLLOW_NOVELS_PER_BLOG), offset=0, max_pages=1
+                    )
+                except Exception:
+                    posts = []
+                return blog.blog_id, posts
+
+        out = {}
+        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+            futures = [pool.submit(job, blog) for blog in targets]
+            for fut in as_completed(futures):
+                try:
+                    blog_id, posts = fut.result()
+                except Exception:
+                    continue
+                out[blog_id] = posts
+        return out
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """系统熵选页 + 页内无放回抽样。"""
-        _check_picks(count)
-        return self._sample_from_tag(tag, count, sort, rng or _SYSTEM_RNG)
-
-    def recommend(self, count: int, rng=None) -> list[Post]:
-        """本地标签池里系统熵选一个标签，再只打一页抽样（不额外拉账号）。"""
+        """在标签全文小说流上系统熵选游标，真随机抽取。"""
         _check_picks(count)
         rng = rng or _SYSTEM_RNG
-        liked = _unique_tags(config.load_favorite_tags())
-        liked_set = set(liked)
-        fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in liked_set]
-        names = liked + fallback
-        if not names:
+        posts = self._sample_from_tag(tag, count, sort, rng)
+        if posts or count != 1 or self._remaining() < 0.5:
+            return posts
+        # 深窗未命中时，保底再取榜首一页，仍只多 1 次请求。
+        pool = self._fetch_tag_window(tag.strip(), sort, 0)
+        return _pick(pool, 1, rng)
+
+    def recommend(self, count: int, rng=None) -> list[Post]:
+        """随机选 count 个喜欢的标签，各在标签全文小说流里真随机抽 1 篇。"""
+        _check_picks(count)
+        rng = rng or _SYSTEM_RNG
+        # 只用本地缓存的喜欢标签，避免再打账号接口把耗时翻倍；缓存由 history 等写入。
+        liked = _unique_tags(config.load_favorite_tags()) or list(FALLBACK_HOT_TAGS)
+        if not liked:
             return []
-        name = names[rng.randrange(len(names))]
-        try:
-            return self._sample_from_tag(name, count, "hot", rng)
-        except ApiError:
-            return []
+        # 一次并行多取 1～2 个标签，降低空窗导致篇数不足的概率。
+        wave = min(len(liked), count + (1 if count < MAX_PICKS else 0))
+        tags = _pick_recommend_tags(liked, wave, rng)
+        found = self._sample_tags_parallel(tags, "new", rng)
+        return found[:count]
 
     def _sample_from_tag(self, tag: str, count: int, sort: str, rng) -> list[Post]:
-        """只请求 1 页：系统熵选 API 起点，再从该页无放回抽取。"""
+        """按标签深度缓存做全域游标抽样；count>1 时并行多窗再合并。"""
         if sort not in SORT_TO_API:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-        start = rng.randrange(SAMPLE_START_PAGES) * TAG_CURSOR_STEP
-        pool = self.search_tag(
-            name, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=1, start_cursor=start
-        )
-        if len(pool) < count and start != 0 and self._remaining() > 0.5:
-            pool = self.search_tag(
-                name, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=1, start_cursor=0
-            )
+        if count == 1:
+            post = self._sample_one_from_tag(name, sort, rng)
+            return [post] if post else []
+        starts = _random_tag_starts(name, sort, count, rng)
+        pools = self._fetch_tag_windows_parallel(name, sort, starts)
+        pool: list[Post] = []
+        seen: set[str] = set()
+        for batch in pools:
+            for post in batch:
+                if post.post_id in seen:
+                    continue
+                seen.add(post.post_id)
+                pool.append(post)
+        if len(pool) < count and self._remaining() > 0.5:
+            more = self._fetch_tag_window(name, sort, 0)
+            for post in more:
+                if post.post_id in seen:
+                    continue
+                seen.add(post.post_id)
+                pool.append(post)
         return _pick(pool, count, rng)
+
+    def _sample_one_from_tag(self, tag: str, sort: str, rng) -> Post | None:
+        """只打 1 次标签页请求，避免二次回落把耗时打到 8 秒外。"""
+        depth = _tag_depth(tag, sort)
+        pages = max(1, depth // TAG_CURSOR_STEP)
+        if self._remaining() < 0.3:
+            return None
+        start = rng.randrange(pages) * TAG_CURSOR_STEP
+        pool = self._fetch_tag_window(tag, sort, start)
+        if not pool and start != 0:
+            _shrink_tag_depth(tag, sort, start)
+            return None
+        if not pool:
+            return None
+        picked = _pick(pool, 1, rng)
+        return picked[0] if picked else None
+
+    def _sample_tags_parallel(self, tags: list[str], sort: str, rng) -> list[Post]:
+        if not tags:
+            return []
+        if len(tags) == 1 or self._transport is not None:
+            found: list[Post] = []
+            for name in tags:
+                post = self._sample_one_from_tag(name, sort, rng)
+                if post:
+                    found.append(post)
+            return found
+
+        def job(name: str):
+            child = self._child_client()
+            with child:
+                return child._sample_one_from_tag(name, sort, rng)
+
+        found: list[Post] = []
+        seen: set[str] = set()
+        with ThreadPoolExecutor(max_workers=min(len(tags), MAX_PICKS)) as pool:
+            futures = [pool.submit(job, name) for name in tags]
+            for fut in as_completed(futures):
+                try:
+                    post = fut.result()
+                except Exception:
+                    continue
+                if not post or post.post_id in seen:
+                    continue
+                seen.add(post.post_id)
+                found.append(post)
+        return found
+
+    def _fetch_tag_windows_parallel(self, tag: str, sort: str, starts: list[int]) -> list[list[Post]]:
+        if not starts:
+            return []
+        if len(starts) == 1 or self._transport is not None:
+            return [self._fetch_tag_window(tag, sort, start) for start in starts]
+
+        def job(start: int):
+            child = self._child_client()
+            with child:
+                return child._fetch_tag_window(tag, sort, start)
+
+        results: list[list[Post] | None] = [None] * len(starts)
+        with ThreadPoolExecutor(max_workers=min(len(starts), 16)) as pool:
+            futures = {pool.submit(job, start): index for index, start in enumerate(starts)}
+            for fut in as_completed(futures):
+                index = futures[fut]
+                try:
+                    results[index] = fut.result()
+                except Exception:
+                    results[index] = []
+        return [batch or [] for batch in results]
+
+    def _fetch_tag_window(self, tag: str, sort: str, start: int) -> list[Post]:
+        pool = self.search_tag(
+            tag, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=1, start_cursor=start
+        )
+        if pool:
+            _expand_tag_depth(tag, sort, start + max(len(pool), TAG_CURSOR_STEP))
+        elif start > 0:
+            _shrink_tag_depth(tag, sort, start)
+        return pool
+
+    def _child_client(self) -> LofterClient:
+        return LofterClient(
+            self._cookie,
+            transport=self._transport,
+            min_interval=self._min_interval,
+            max_attempts=self._max_attempts,
+            budget=max(0.5, self._remaining()),
+        )
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
@@ -1339,6 +1537,76 @@ def _pick(pool: list[Post], count: int, rng) -> list[Post]:
         rng.shuffle(picked)
         return picked
     return rng.sample(pool, count)
+
+
+def _post_from_cache(row: dict) -> Post:
+    return Post(
+        post_id=str(row.get("post_id") or ""),
+        title=str(row.get("title") or "无标题"),
+        author=str(row.get("author") or "未知"),
+        hot=int(row.get("hot") or 0),
+        blog_id=str(row.get("blog_id") or ""),
+        url=str(row.get("url") or ""),
+        publish_time=int(row.get("publish_time") or 0),
+        post_type=int(row.get("post_type") or NOVEL_TYPE),
+    )
+
+
+def _pick_recommend_tags(liked: list[str], count: int, rng) -> list[str]:
+    names = list(liked)
+    if not names:
+        return []
+    if len(names) >= count:
+        return rng.sample(names, count)
+    picked = list(names)
+    rng.shuffle(picked)
+    while len(picked) < count:
+        picked.append(names[rng.randrange(len(names))])
+    return picked
+
+
+def _tag_depth(tag: str, sort: str) -> int:
+    cached = config.load_tag_depth(tag, sort)
+    if cached:
+        return min(TAG_DEPTH_MAX, max(TAG_CURSOR_STEP, cached))
+    return TAG_DEPTH_DEFAULT
+
+
+def _remember_tag_depth(tag: str, sort: str, cursor: int) -> None:
+    if cursor <= 0:
+        return
+    current = config.load_tag_depth(tag, sort) or TAG_DEPTH_DEFAULT
+    config.save_tag_depth(tag, sort, min(TAG_DEPTH_MAX, max(current, cursor)))
+
+
+def _expand_tag_depth(tag: str, sort: str, cursor: int) -> None:
+    _remember_tag_depth(tag, sort, cursor + TAG_CURSOR_STEP * 20)
+
+
+def _shrink_tag_depth(tag: str, sort: str, empty_at: int) -> None:
+    if empty_at <= TAG_CURSOR_STEP:
+        return
+    current = config.load_tag_depth(tag, sort) or TAG_DEPTH_DEFAULT
+    narrowed = max(TAG_CURSOR_STEP, min(current, empty_at))
+    config.save_tag_depth(tag, sort, narrowed)
+
+
+def _random_tag_starts(tag: str, sort: str, count: int, rng) -> list[int]:
+    depth = _tag_depth(tag, sort)
+    pages = max(1, depth // TAG_CURSOR_STEP)
+    starts: list[int] = []
+    seen: set[int] = set()
+    for _ in range(count * 3):
+        if len(starts) >= count:
+            break
+        start = rng.randrange(pages) * TAG_CURSOR_STEP
+        if start in seen:
+            continue
+        seen.add(start)
+        starts.append(start)
+    while len(starts) < count:
+        starts.append(0)
+    return starts
 
 
 def _check_picks(count: int) -> None:

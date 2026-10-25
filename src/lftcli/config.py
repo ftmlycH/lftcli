@@ -51,6 +51,9 @@ def save_cookie(cookie: str) -> str:
     data["cookie"] = value
     data.pop("blog_domain", None)
     data.pop("favorite_tags", None)
+    data.pop("tag_depths", None)
+    data.pop("following_blogs", None)
+    data.pop("following_posts", None)
     _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     if os.name != "nt":
         try:
@@ -63,7 +66,7 @@ def save_cookie(cookie: str) -> str:
 def clear_cookie() -> bool:
     data = _read_config()
     changed = False
-    for key in ("cookie", "blog_domain", "favorite_tags"):
+    for key in ("cookie", "blog_domain", "favorite_tags", "tag_depths", "following_blogs", "following_posts"):
         if key in data:
             del data[key]
             changed = True
@@ -106,6 +109,119 @@ def save_favorite_tags(tags: list[str]) -> None:
     if data.get("favorite_tags") == cleaned:
         return
     data["favorite_tags"] = cleaned
+    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_tag_depth(tag: str, sort: str) -> int | None:
+    data = _read_config()
+    depths = data.get("tag_depths") if isinstance(data, dict) else None
+    if not isinstance(depths, dict):
+        return None
+    value = depths.get(f"{tag}|{sort}")
+    try:
+        depth = int(value)
+    except (TypeError, ValueError):
+        return None
+    return depth if depth > 0 else None
+
+
+def save_tag_depth(tag: str, sort: str, depth: int) -> None:
+    try:
+        value = int(depth)
+    except (TypeError, ValueError):
+        return
+    if value <= 0:
+        return
+    data = _read_config()
+    depths = data.get("tag_depths")
+    if not isinstance(depths, dict):
+        depths = {}
+    key = f"{tag}|{sort}"
+    if depths.get(key) == value:
+        return
+    depths[key] = value
+    data["tag_depths"] = depths
+    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_following_blogs() -> list[dict]:
+    data = _read_config()
+    rows = data.get("following_blogs") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    found: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        blog_id = str(row.get("blog_id") or "").strip()
+        name = str(row.get("name") or "").strip()
+        if not blog_id or not name:
+            continue
+        found.append(
+            {
+                "blog_id": blog_id,
+                "name": name,
+                "nickname": str(row.get("nickname") or name).strip() or name,
+                "url": str(row.get("url") or "").strip(),
+            }
+        )
+    return found
+
+
+def save_following_blogs(blogs) -> None:
+    rows: list[dict] = []
+    for blog in blogs:
+        blog_id = str(getattr(blog, "blog_id", "") or "").strip()
+        name = str(getattr(blog, "name", "") or "").strip()
+        if not blog_id or not name:
+            continue
+        rows.append(
+            {
+                "blog_id": blog_id,
+                "name": name,
+                "nickname": str(getattr(blog, "nickname", "") or name).strip() or name,
+                "url": str(getattr(blog, "url", "") or "").strip(),
+            }
+        )
+        if len(rows) >= 80:
+            break
+    data = _read_config()
+    if data.get("following_blogs") == rows:
+        return
+    data["following_blogs"] = rows
+    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_following_posts() -> list[dict]:
+    data = _read_config()
+    rows = data.get("following_posts") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict) and row.get("post_id")]
+
+
+def save_following_posts(posts) -> None:
+    rows: list[dict] = []
+    for post in posts:
+        post_id = str(getattr(post, "post_id", "") or "").strip()
+        if not post_id:
+            continue
+        rows.append(
+            {
+                "post_id": post_id,
+                "title": str(getattr(post, "title", "") or ""),
+                "author": str(getattr(post, "author", "") or ""),
+                "hot": int(getattr(post, "hot", 0) or 0),
+                "blog_id": str(getattr(post, "blog_id", "") or ""),
+                "url": str(getattr(post, "url", "") or ""),
+                "publish_time": int(getattr(post, "publish_time", 0) or 0),
+                "post_type": int(getattr(post, "post_type", 1) or 1),
+            }
+        )
+        if len(rows) >= 200:
+            break
+    data = _read_config()
+    data["following_posts"] = rows
     _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -257,7 +373,9 @@ def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8", newline="\n")
+        # 清理孤立代理项，避免 Windows 下 utf-8 编码失败。
+        safe = text.encode("utf-8", "replace").decode("utf-8")
+        tmp.write_text(safe, encoding="utf-8", newline="\n")
         tmp.replace(path)
     except Exception:
         try:
