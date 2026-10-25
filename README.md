@@ -46,8 +46,6 @@ sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 
 ## 命令
 
-在 `lofter>` 里直接输入，不要加 `lftcli`。`exit` 退出。列表只保留文字小说。
-
 | 命令 | 作用 |
 | --- | --- |
 | `cookie` | 查看、保存或删除 Cookie |
