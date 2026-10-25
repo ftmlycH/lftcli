@@ -342,52 +342,56 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].author, "作者")
         self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
 
-    def test_random_uses_one_tag_page(self):
-        pages = {"n": 0, "offsets": []}
+    def test_random_samples_from_search_tag_pool_of_20(self):
+        pages = {"n": 0}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             pages["n"] += 1
-            pages["offsets"].append(request.url.params["offset"])
-            items = [_item(post_id=i, title=f"标题{i}") for i in range(12)]
+            base = (pages["n"] - 1) * 20
+            items = [_item(post_id=base + i, title=f"标题{base + i}") for i in range(20)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": base + 20, "items": items}},
             )
 
         class Rng:
-            def choice(self, seq):
+            def randrange(self, stop):
                 return 0
 
             def shuffle(self, items):
                 return None
 
             def sample(self, population, count):
+                self.last_pool = len(population)
                 return list(population)[:count]
 
+        rng = Rng()
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.sample_tag("原创小说", 5, rng=Rng())
+            posts = api.sample_tag("原创小说", 5, rng=rng)
         self.assertEqual(len(posts), 5)
+        self.assertEqual(rng.last_pool, 20)
         self.assertEqual(pages["n"], 1)
-        self.assertEqual(pages["offsets"], ["0"])
 
-    def test_random_falls_back_to_first_page_when_needed(self):
-        offsets = []
+    def test_random_falls_back_to_offset_zero_when_window_is_short(self):
+        calls = {"n": 0}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            offset = request.url.params["offset"]
-            offsets.append(offset)
-            if offset == "40":
-                items = [_item(post_id=1, title="一")]
+            calls["n"] += 1
+            # 第一次窗口从中间开始，接口很快空；第二次从头有货。
+            if calls["n"] == 1:
+                items = [_item(post_id=1, title="少")]
+                nxt = -1
             else:
-                items = [_item(post_id=10 + i, title=f"小说{i}") for i in range(5)]
+                items = [_item(post_id=10 + i, title=f"小说{i}") for i in range(20)]
+                nxt = 20
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
             )
 
         class Rng:
-            def choice(self, seq):
-                return 40
+            def randrange(self, stop):
+                return 15
 
             def sample(self, population, count):
                 return list(population)[:count]
@@ -397,10 +401,10 @@ class ClientTests(unittest.TestCase):
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("原创小说", 3, rng=Rng())
-        self.assertEqual(offsets, ["40", "0"])
         self.assertEqual(len(posts), 3)
+        self.assertGreaterEqual(calls["n"], 2)
 
-    def test_random_returns_what_it_has_when_tag_is_short(self):
+    def test_random_returns_available_when_tag_is_short(self):
         def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
             return client.HTTPResponse(
                 200,
@@ -411,7 +415,7 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
-            def choice(self, seq):
+            def randrange(self, stop):
                 return 0
 
             def shuffle(self, items):
@@ -424,8 +428,8 @@ class ClientTests(unittest.TestCase):
             posts = api.sample_tag("冷门", 3, rng=Rng())
         self.assertEqual([post.post_id for post in posts], ["1"])
 
-    def test_recommend_fills_from_one_liked_tag_in_one_page(self):
-        calls = {"tags": [], "explore": 0}
+    def test_recommend_samples_from_liked_tag_pool(self):
+        calls = {"tags": []}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             url = request.url.full
@@ -434,18 +438,18 @@ class ClientTests(unittest.TestCase):
                     200,
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "乙"}]}},
                 )
-            if "exploreRecom" in url:
-                calls["explore"] += 1
-                return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             calls["tags"].append(tag)
-            items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(8)]
+            items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(20)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
             )
 
         class Rng:
+            def randrange(self, stop):
+                return 0
+
             def shuffle(self, items):
                 return None
 
@@ -456,9 +460,8 @@ class ClientTests(unittest.TestCase):
             posts = api.recommend(3, rng=Rng())
         self.assertEqual(len(posts), 3)
         self.assertEqual(calls["tags"], ["乙"])
-        self.assertEqual(calls["explore"], 0)
 
-    def test_recommend_keeps_filling_from_fallback_tags(self):
+    def test_recommend_switches_tag_when_first_is_empty(self):
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             url = request.url.full
             if "usercounts" in url:
@@ -468,17 +471,18 @@ class ClientTests(unittest.TestCase):
                 )
             tag = request.url.params.get("tag", "")
             if tag == "甲":
-                items = [_item(post_id=1, title="甲1")]
-            elif tag in client.FALLBACK_HOT_TAGS[:3]:
-                items = [_item(post_id=10 + abs(hash(tag)) % 40 + i, title=f"{tag}{i}") for i in range(4)]
-            else:
                 items = []
+            else:
+                items = [_item(post_id=10 + abs(hash(tag)) % 50 + i, title=f"{tag}{i}") for i in range(20)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1 if not items else 20, "items": items}},
             )
 
         class Rng:
+            def randrange(self, stop):
+                return 0
+
             def shuffle(self, items):
                 return None
 
