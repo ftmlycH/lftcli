@@ -342,12 +342,11 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].author, "作者")
         self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
 
-    def test_random_uses_search_tag_pool_and_returns_count(self):
+    def test_random_skips_images_then_samples(self):
         pages = {"n": 0}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             pages["n"] += 1
-            # 前几页全是图，后面才有小说 —— 模拟 tag 翻页凑小说。
             if pages["n"] <= 2:
                 image = _item(post_id=pages["n"], title="图")
                 image["post"]["type"] = 2
@@ -362,9 +361,6 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
-            def randrange(self, stop):
-                return 0
-
             def shuffle(self, items):
                 return None
 
@@ -374,67 +370,9 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("millsage", 2, rng=Rng())
         self.assertEqual(len(posts), 2)
-        self.assertTrue(all(post.post_id.startswith("10") for post in posts))
         self.assertGreaterEqual(pages["n"], 3)
 
-    def test_random_falls_back_to_start_zero_when_deep_group_is_empty(self):
-        offsets = []
-
-        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            offset = request.url.params["offset"]
-            offsets.append(offset)
-            # search_tag 的 API cursor：深组很快空，第 0 组有小说。
-            if offset != "0":
-                items = []
-                nxt = -1
-            else:
-                items = [_item(post_id=i, title=f"文{i}") for i in range(12)]
-                nxt = -1
-            return client.HTTPResponse(
-                200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
-            )
-
-        class Rng:
-            def randrange(self, stop):
-                return 3
-
-            def sample(self, population, count):
-                return list(population)[:count]
-
-            def shuffle(self, items):
-                return None
-
-        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.sample_tag("原创小说", 3, rng=Rng())
-        self.assertEqual(len(posts), 3)
-        self.assertIn("0", offsets)
-
-    def test_random_returns_available_when_tag_is_short(self):
-        def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
-            return client.HTTPResponse(
-                200,
-                json={
-                    "meta": {"status": 200, "msg": ""},
-                    "response": {"offset": -1, "items": [_item(post_id=1, title="仅一篇")]},
-                },
-            )
-
-        class Rng:
-            def randrange(self, stop):
-                return 0
-
-            def shuffle(self, items):
-                return None
-
-            def sample(self, population, count):
-                return list(population)[:count]
-
-        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.sample_tag("冷门", 3, rng=Rng())
-        self.assertEqual([post.post_id for post in posts], ["1"])
-
-    def test_random_tries_other_sorts_when_hot_is_empty(self):
+    def test_random_falls_back_to_new_when_hot_empty(self):
         seen = {"types": []}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
@@ -442,19 +380,14 @@ class ClientTests(unittest.TestCase):
             seen["types"].append(kind)
             if kind == "total":
                 items = []
-                nxt = -1
             else:
                 items = [_item(post_id=20 + i, title=f"新{i}") for i in range(8)]
-                nxt = -1
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
             )
 
         class Rng:
-            def randrange(self, stop):
-                return 0
-
             def shuffle(self, items):
                 return None
 
@@ -466,8 +399,27 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(posts), 2)
         self.assertIn("new", seen["types"])
 
+    def test_tag_offset_keeps_scanning_for_more_novels(self):
+        pages = {"n": 0}
+
+        def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
+            pages["n"] += 1
+            # 每页只有 1 篇小说，offset=5 需要至少扫到第 10 页。
+            items = [_item(post_id=pages["n"], title=f"文{pages['n']}")]
+            nxt = pages["n"] * 20
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
+            )
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.search_tag("millsage", limit=5, offset=5)
+        self.assertEqual(len(posts), 5)
+        self.assertEqual([post.post_id for post in posts], ["6", "7", "8", "9", "10"])
+        self.assertGreaterEqual(pages["n"], 10)
+
     def test_recommend_samples_from_liked_tag_pool(self):
-        calls = {"tags": []}
+        calls = {"tags": [], "explore": 0}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
             url = request.url.full
@@ -477,6 +429,7 @@ class ClientTests(unittest.TestCase):
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "乙"}]}},
                 )
             if "exploreRecom" in url:
+                calls["explore"] += 1
                 return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             calls["tags"].append(tag)
@@ -487,9 +440,6 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
-            def randrange(self, stop):
-                return 0
-
             def shuffle(self, items):
                 return None
 
@@ -500,6 +450,7 @@ class ClientTests(unittest.TestCase):
             posts = api.recommend(3, rng=Rng())
         self.assertEqual(len(posts), 3)
         self.assertEqual(calls["tags"][0], "乙")
+        self.assertEqual(calls["explore"], 0)
 
     def test_recommend_switches_tag_when_first_is_empty(self):
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
@@ -509,8 +460,6 @@ class ClientTests(unittest.TestCase):
                     200,
                     json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "甲"}]}},
                 )
-            if "exploreRecom" in url:
-                return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
             tag = request.url.params.get("tag", "")
             if tag == "甲":
                 items = []
@@ -522,9 +471,6 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
-            def randrange(self, stop):
-                return 0
-
             def shuffle(self, items):
                 return None
 

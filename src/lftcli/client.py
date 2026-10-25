@@ -35,13 +35,7 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 20
 MAX_PICKS = 5
-# random / recommend：用 search_tag 凑满小说池再抽（与 tag 同一路径）。
 SAMPLE_POOL = 20
-# 随机起点只在前几组，避免高 offset 扫太久。
-SAMPLE_GROUPS = 5
-SAMPLE_PAGES = 15
-# 平台标签列表大约只能翻到前 1000 条。
-TAG_RESULT_CAP = 1000
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -215,7 +209,7 @@ class LofterClient:
             "合集文章的返回结构和预期不一致，请只更新 client.py。",
         )
 
-    def search_tag(self, tag: str, sort: str = "hot", limit: int = 20, offset: int = 0, max_pages: int = 20) -> list[Post]:
+    def search_tag(self, tag: str, sort: str = "hot", limit: int = 20, offset: int = 0, max_pages: int | None = None) -> list[Post]:
         _check_window(limit, offset, ceiling=300)
         name = tag.strip()
         if not name:
@@ -225,11 +219,13 @@ class LofterClient:
             raise ApiError("排序只能是 hot、new 或 month。")
 
         need = offset + limit
+        # 图多时一页几乎没有小说，页数按需求放大，避免 --offset 直接空。
+        pages = max_pages if max_pages is not None else min(80, max(16, need * 4))
         found: list[Post] = []
         seen: set[str] = set()
         cursor = 0
         before: int | None = None
-        for _ in range(max_pages):
+        for _ in range(pages):
             if len(found) >= need:
                 break
             payload = self._request(
@@ -273,14 +269,12 @@ class LofterClient:
                 if malformed == len(rows) and not found:
                     raise ApiError("文章数据结构异常，请只更新 client.py。")
                 break
+            next_cursor = _as_int(data.get("offset"))
             if oldest is not None and before is not None and oldest >= before and api_sort == "new":
-                # 最新排序的时间不再变早，且游标不前进时停，避免空转。
-                next_cursor = _as_int(data.get("offset"))
                 if next_cursor is None or next_cursor <= cursor:
                     break
             if oldest is not None:
                 before = oldest if before is None else min(before, oldest)
-            next_cursor = _as_int(data.get("offset"))
             if next_cursor is None or next_cursor <= cursor:
                 break
             cursor = next_cursor
@@ -414,12 +408,12 @@ class LofterClient:
     def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
         need = offset + limit
-        # 少扫几人、每人一次请求多取，尽快凑满。
-        blog_limit = min(12, max(need, 5))
+        # 少请求：少扫几人，每人只取够用的篇数。
+        blog_limit = min(10, max(need, 4))
         blogs = self.get_following(limit=blog_limit, offset=0)
         found: list[Post] = []
         seen: set[str] = set()
-        per_blog = min(10, max(need, 5))
+        per_blog = min(6, max((need + blog_limit - 1) // max(blog_limit, 1), 2))
         for blog in blogs:
             if len(found) >= need:
                 break
@@ -437,26 +431,20 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """与 tag 相同：search_tag 凑小说池，再按组起点随机抽。"""
+        """search_tag 拉一小池小说，再纯随机抽。"""
         _check_picks(count)
         return self._sample_from_tag(tag, count, sort, rng or random)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """喜欢 / 热门 / 兜底标签轮询抽样，有结果就停。"""
+        """喜欢的标签优先，再兜底标签；每个标签最多试一次。"""
         _check_picks(count)
         rng = rng or random
         liked = _unique_tags(self.get_favorite_tags())
         rng.shuffle(liked)
         liked_set = set(liked)
-        try:
-            hot = [tag for tag in _unique_tags(self.get_hot_tags()) if tag not in liked_set]
-        except ApiError:
-            hot = []
-        rng.shuffle(hot)
-        used = liked_set | set(hot)
-        fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in used]
+        fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in liked_set]
         rng.shuffle(fallback)
-        for name in liked + hot + fallback:
+        for name in liked + fallback:
             try:
                 posts = self._sample_from_tag(name, count, "hot", rng)
             except ApiError:
@@ -466,53 +454,18 @@ class LofterClient:
         return []
 
     def _sample_from_tag(self, tag: str, count: int, sort: str, rng) -> list[Post]:
-        """
-        用 search_tag（会翻页直到凑够文字小说）拉最多 20 篇，再纯随机抽。
-        先随机前几组起点，不够再从头；再换 hot/new/month，尽量不空。
-        """
+        """只打 search_tag 一到两次：先指定排序，空再试 new。"""
         if sort not in SORT_TO_API:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-
-        sorts: list[str] = []
-        for item in (sort, "new", "hot", "month"):
-            if item in SORT_TO_API and item not in sorts:
-                sorts.append(item)
-
-        best: list[Post] = []
-        group = rng.randrange(SAMPLE_GROUPS)
-        # 随机组优先，最后一定回到第 0 组。
-        starts = [group * SAMPLE_POOL, 0]
-        ordered_starts: list[int] = []
-        seen_starts: set[int] = set()
-        for start in starts:
-            if start in seen_starts:
-                continue
-            seen_starts.add(start)
-            ordered_starts.append(start)
-
-        for api_sort_name in sorts:
-            for start in ordered_starts:
-                try:
-                    pool = self.search_tag(
-                        name,
-                        sort=api_sort_name,
-                        limit=SAMPLE_POOL,
-                        offset=start,
-                        max_pages=SAMPLE_PAGES,
-                    )
-                except ApiError:
-                    continue
-                if len(pool) >= count:
-                    return _pick(pool, count, rng)
-                if len(pool) > len(best):
-                    best = pool
-            # 这个排序已有货，不必再换排序空转。
-            if best:
-                break
-        return _pick(best, count, rng) if best else []
+        pool = self.search_tag(name, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=12)
+        if len(pool) < count and sort != "new":
+            more = self.search_tag(name, sort="new", limit=SAMPLE_POOL, offset=0, max_pages=12)
+            if len(more) > len(pool):
+                pool = more
+        return _pick(pool, count, rng)
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
