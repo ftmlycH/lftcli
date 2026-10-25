@@ -34,6 +34,8 @@ FALLBACK_HOT_TAGS = (
     "三角初华", "三角初音",
 )
 TAG_PAGE_SIZE = 12
+MAX_PICKS = 5
+RANDOM_PAGES = 5
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -420,13 +422,11 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        if count < 1 or count > 20:
-            raise ApiError("篇数需要在 1 到 20 之间。")
-        return self._random_novels(tag, sort, count, rng or random)
+        _check_picks(count)
+        return self._draw(tag, sort, count, rng or random)
 
     def recommend(self, count: int) -> list[Post]:
-        if count < 1 or count > 15:
-            raise ApiError("篇数需要在 1 到 15 之间。")
+        _check_picks(count)
         liked = self.get_favorite_tags()
         hot = self.get_hot_tags()
         tags = select_recommend_tags(count, liked, hot, random)
@@ -434,46 +434,43 @@ class LofterClient:
         random.shuffle(spare)
         posts: list[Post] = []
         seen: set[str] = set()
-        queue = list(tags)
-        steps = 0
-        while queue and len(posts) < count and steps < count + len(spare) + 1:
-            steps += 1
-            tag = queue.pop(0)
+        for tag in (list(tags) + spare)[: count + 2]:
+            if len(posts) >= count:
+                break
             try:
-                picked = self._random_novels(tag, "hot", 1)
+                picked = self._draw(tag, "hot", 1, random)
             except ApiError:
-                picked = []
-            if not picked:
-                if spare:
-                    queue.append(spare.pop())
                 continue
-            post = picked[0]
-            if post.post_id in seen:
-                continue
-            seen.add(post.post_id)
-            posts.append(post)
-        return posts
+            for post in picked:
+                if post.post_id in seen:
+                    continue
+                seen.add(post.post_id)
+                posts.append(post)
+        return posts[:count]
 
-    def _random_novels(self, tag: str, sort: str, count: int, rng=None) -> list[Post]:
-        """从标签里随机抽一页，再在这一页里抽，不从热度列表开头按顺序取。"""
-        rng = rng or random
+    def _draw(self, tag: str, sort: str, count: int, rng) -> list[Post]:
         api_sort = SORT_TO_API.get(sort)
         if api_sort is None:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-        start = rng.randrange(8) * TAG_PAGE_SIZE
-        offsets = (start,) if start == 0 else (start, 0)
-        for offset in offsets:
-            novels = [post for post in self._tag_page(name, api_sort, offset) if post.post_type == NOVEL_TYPE]
+        pages = list(range(RANDOM_PAGES))
+        rng.shuffle(pages)
+        posts: list[Post] = []
+        seen: set[str] = set()
+        for page in pages[:count]:
+            novels = [
+                post
+                for post in self._tag_page(name, api_sort, page * TAG_PAGE_SIZE)
+                if post.post_type == NOVEL_TYPE and post.post_id not in seen
+            ]
             if not novels:
                 continue
-            if len(novels) <= count:
-                rng.shuffle(novels)
-                return novels
-            return rng.sample(novels, count)
-        return []
+            pick = rng.choice(novels)
+            seen.add(pick.post_id)
+            posts.append(pick)
+        return posts
 
     def _tag_page(self, tag: str, api_sort: str, offset: int) -> list[Post]:
         payload = self._request(
@@ -657,10 +654,6 @@ def get_likes(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
 
 def get_my_posts(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
     return _run(cookie, "get_my_posts", limit, offset)
-
-
-def get_blog_posts(cookie: str, blog: str, limit: int = 20, offset: int = 0) -> list[Post]:
-    return _run(cookie, "get_blog_posts", blog, limit, offset)
 
 
 def get_following(cookie: str, limit: int = 20, offset: int = 0) -> list[Blog]:
@@ -1262,6 +1255,11 @@ def _as_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _check_picks(count: int) -> None:
+    if count < 1 or count > MAX_PICKS:
+        raise ApiError(f"篇数需要在 1 到 {MAX_PICKS} 之间。")
 
 
 def _check_window(limit: int, offset: int, ceiling: int = 100) -> None:

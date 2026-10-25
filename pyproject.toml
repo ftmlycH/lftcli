@@ -8,7 +8,6 @@ dependencies = []
 
 [project.scripts]
 lftcli = "lftcli.main:main"
-lofter = "lftcli.main:main"
 
 [build-system]
 requires = ["setuptools>=61"]

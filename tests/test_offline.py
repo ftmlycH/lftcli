@@ -333,14 +333,11 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
-            def randrange(self, _stop):
-                return 2
+            def shuffle(self, items):
+                items[:] = [2, 0, 1, 3, 4][: len(items)]
 
-            def shuffle(self, _items):
-                return None
-
-            def sample(self, population, count):
-                return list(population)[:count]
+            def choice(self, population):
+                return population[0]
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("原创小说", 1, rng=Rng())
