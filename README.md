@@ -1,208 +1,58 @@
 # lofter-cli / lftcli
 
-一个 LOFTER 终端客户端。
-
-## 下载
-
-源码：<https://github.com/ftmlycH/lftcli>
-
+在终端里读 LOFTER 的文字小说。
 ```bash
 git clone https://github.com/ftmlycH/lftcli.git
 cd lftcli
 ```
 
-需要 Python 3.10 或更高版本，没有第三方库。程序在 `src/lftcli`。装好后执行 `lftcli` 进入 `lofter>`。还没装进环境时，在项目目录运行 `python3 main.py`，效果相同。
+还没装进环境时，在项目目录运行 `python3 main.py`。装好后执行 `lftcli`，进入 `lofter>`。
 
-## 各系统安装
+## 安装
 
-### Windows
+先装 Python 3.10+，再在项目目录执行 `python3 -m pip install -e .`。
 
-1. 从 [python.org](https://www.python.org/downloads/windows/) 安装 Python 3.10+，勾选 **Add python.exe to PATH**。
-2. 克隆仓库后，在项目目录执行：
+| 系统 | 准备 Python |
+| --- | --- |
+| Windows | [python.org](https://www.python.org/downloads/windows/)，勾选 Add python.exe to PATH。没有 `python3` 时用 `py -3` |
+| macOS | `brew install python`，或使用系统 / python.org 的 `python3` |
+| Linux | Debian、Ubuntu 见下方安装包。Fedora：`sudo dnf install python3`。Arch：`sudo pacman -S python` |
+| FreeBSD、DragonFly | `pkg install python3` |
+| OpenBSD | `pkg_add python3` |
+| NetBSD | `pkgin install python312`，之后用 `python3.12` |
 
-```powershell
-py -3 -m pip install -e .
-lftcli
-```
-
-如果 `py` 不可用，把 `py -3` 换成 `python`。Cookie 粘贴时会显示在屏幕上，避免隐藏输入把内容弄坏。配置文件在 `%USERPROFILE%\.lofter-cli\config.json`。
-
-### macOS
-
-```bash
-brew install python
-cd lftcli
-python3 -m pip install -e .
-lftcli
-```
-
-没有 Homebrew 时，用系统自带或 python.org 安装的 `python3` 即可。配置文件在 `~/.lofter-cli/config.json`。`cookie set` 的输入不会回显。
-
-### Linux
-
-Debian、Ubuntu 可以用安装包，不经过 `apt` 读软件源：
-
+Debian、Ubuntu 可以使用deb包安装
 ```bash
 python3 packaging/build_deb.py
 sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 ```
 
-其他发行版直接从源码安装：
-
-```bash
-# Fedora / RHEL
-sudo dnf install python3
-
-# Arch
-sudo pacman -S python
-
-cd lftcli
-python3 -m pip install -e .
-lftcli
-```
-
-配置文件在 `~/.lofter-cli/config.json`，权限只有当前用户可读。
-
-### BSD
-
-FreeBSD、DragonFly BSD：
-
-```sh
-pkg install python3
-cd lftcli
-python3 -m pip install -e .
-lftcli
-```
-
-OpenBSD：
-
-```sh
-pkg_add python3
-cd lftcli
-python3 -m pip install -e .
-lftcli
-```
-
-NetBSD：
-
-```sh
-pkgin install python312
-cd lftcli
-python3.12 -m pip install -e .
-python3.12 -m lftcli
-```
-
-BSD 不使用前面的 `.deb`。配置文件同样是 `~/.lofter-cli/config.json`。
-
-装好之后：
-
-```text
-lftcli
-lofter> tag 原创小说 --sort hot --limit 5
-lofter> post 123456
-lofter> clear
-lofter> exit
-```
-
-列表只保留文字小说。标记为图片或视频的帖子不会出现。
+配置文件：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，其他系统是 `~/.lofter-cli/config.json`。
 
 ## Cookie
 
-默认用浏览器里复制的 Cookie，不会自动登录，也不处理验证码。订阅合集、喜欢和浏览记录必须登录；标签和公开文章有时不校验 Cookie，但本程序在任何网络请求之前都会先确认 Cookie 已经配置。
+用浏览器登录 [lofter.com](https://www.lofter.com/)，在开发者工具的 Cookies 里复制 `LOFTER-PHONE-LOGIN-AUTH`，没有就复制 `LOFTER_SESS`。然后执行 `cookie set`。Windows 上粘贴内容会显示出来；其他系统不回显。
 
-1. 用浏览器登录 [lofter.com](https://www.lofter.com/)。
-2. 打开开发者工具，进入 Application / 应用程序 → Cookies → `https://www.lofter.com`。
-3. 复制 `LOFTER-PHONE-LOGIN-AUTH` 的值。手机号登录一般是这一项。没有的话，复制 `LOFTER_SESS`，或者整段 Cookie。
-4. 在终端运行 `lftcli cookie set`，按提示粘贴后回车。Windows 上这一步会显示在屏幕上，因为隐藏输入无法粘贴，还会把内容弄坏。macOS、Linux 和 BSD 上输入不会回显。
-
-保存位置：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，macOS、Linux 和 BSD 是 `~/.lofter-cli/config.json`。`lftcli cookie` 只显示是否已保存和长度，不显示内容。`lftcli cookie clear` 删除文件里的 Cookie。`lftcli cookie check` 向服务器确认当前生效的登录。
-
-从管道读入也可以：`Get-Content cookie.txt | lftcli cookie set`。保存后默认会请求一次账号接口确认登录；只要保存、不联网时加 `--no-check`。
-
-环境变量 `LOFTER_COOKIE` 优先于配置文件。变量还在时，刚保存的文件不会被后续命令使用。不要把配置文件提交到仓库。
-
-Cookie 失效时，程序会提示重新复制 `LOFTER-PHONE-LOGIN-AUTH` 或 `LOFTER_SESS`，不会把 traceback 打到终端。
+`cookie` 只显示是否保存和长度，不显示内容。环境变量 `LOFTER_COOKIE` 优先于配置文件。
 
 ## 命令
 
-进入 `lofter>` 之后直接输入下面的指令，不要再加 `lftcli`。
-
-```text
-cookie
-cookie set [--no-check]
-cookie check
-cookie clear
-collections [id] [--limit] [--offset] [--order old|new]
-mine [--limit] [--offset]
-following [--limit] [--offset]
-likes [--limit] [--offset]
-history [--limit] [--offset]
-tag <tag> [--sort hot|new|month] [--limit] [--offset]
-random <tag> [--sort hot|new|month] [--count N]
-recommend <count>
-post <id-or-url> [--markdown]
-clear
-```
+在 `lofter>` 里直接输入，不要加 `lftcli`。`exit` 退出。列表只保留文字小说。
 
 | 命令 | 作用 |
 | --- | --- |
-| `cookie` | 查看、保存或删除本机 Cookie |
-| `collections` | 不带 ID 时列出订阅的合集。带上 ID 就列出里面的文章，默认从旧到新 |
+| `cookie` | 查看、保存或删除 Cookie |
+| `collections [id]` | 订阅的合集。带 ID 则列出其中的文章，默认从旧到新 |
 | `mine` | 我发布的文字 |
 | `following` | 关注的人发布的文字 |
 | `likes` | 我喜欢的文章 |
-| `history` | 账号里浏览过的文章 |
-| `tag` | 标签检索。`hot` 是总热度，`new` 是最新，`month` 是月榜 |
-| `recommend 篇数` | 先选标签，再按篇数随机抽同样多的页，每页一篇。最多 5 篇 |
-| `random` | 按篇数随机抽同样多的页，每页一篇。最多 5 篇 |
-| `post` | 一篇文章的纯文本。`--markdown` 才带轻量标记 |
-| `clear` / `cls` | 清空屏幕。Windows、macOS、Linux 和 BSD 都会处理 |
+| `history` | 浏览过的文章 |
+| `tag <tag> [--sort hot\|new\|month]` | 标签检索。`hot` 总热度，`new` 最新，`month` 月榜 |
+| `random <tag> [--count N]` | 要几篇就随机抽几页，每页一篇。最多 5 篇，只在前 5 页里抽 |
+| `recommend <N>` | 先选标签，再按上面的方式抽。最多 5 篇 |
+| `post <id 或链接>` | 读正文。`--markdown` 才带轻量标记 |
+| `clear` / `cls` | 清屏 |
 
-Windows 的传统控制台会打开 ANSI 显示，中文和分隔线才能正常出现。Linux 和 macOS 上方向键可以改正在输入的指令。正文会按终端宽度折行，一个汉字按两个宽度计算。配置文件在 Linux / macOS 上是 `~/.lofter-cli/config.json`，权限会设成只有当前用户可读。
+## 说明
 
-文章列表固定为一行一篇：
-
-```text
-[7665822603] 标题 · 作者 · 热度 129170
-```
-
-合集列表：
-
-```text
-[5333228] 合集名 · 作者 · 12篇
-```
-
-文章：
-
-```text
-标题：标题
-作者：作者
-────────────────────────
-正文第一段
-
-正文第二段
-```
-
-`post 数字ID` 能打开的，是之前在列表里出现过的文章。正文接口需要博客 ID 和文章 ID，列表命令会把这个对应关系记在 `~/.lofter-cli/posts.json`。手里只有链接时，直接把链接传给 `post`。
-
-`random` 和 `recommend` 都是要几篇就随机抽几页，再从每页里随机抽一篇。最多 5 篇，只在前 5 页里抽。`tag` 仍按顺序翻页。
-
-## 请求约束
-
-这些都封在 `src/lftcli/client.py` 里：
-
-- 超时 15 秒。
-- 相邻请求至少间隔 0.3 秒。
-- 连接失败、超时，以及 HTTP 429 / 5xx，最多请求 3 次。
-- 其他 HTTP 错误不重试。
-- HTTP 401 / 403，或响应体里的 401 / 403，变成登录失效提示。
-
-阅读会走文章详情接口。平台可能把这次读取算进浏览量。
-
-## 已知局限
-
-- 接口不是官方的。失效时更新 `src/lftcli/client.py` 顶部的地址和参数，命令和输出不用改。
-- 订阅、喜欢、浏览记录需要有效登录 Cookie。付费或仅自己可见的正文，可能拿不到全文。
-- 热度排序受平台过滤影响，不保证严格按数字递减。
-- 不支持图片。纯文本模式下图片会被去掉；没有文字时会提示这篇没有可阅读的正文。
-- 「我的喜欢」走网页收藏接口。如果返回结构变了，只改 `src/lftcli/client.py`。
+地址和参数只在 `src/lftcli/client.py`。超时 15 秒，相邻请求至少间隔 0.3 秒，连接失败、超时和 HTTP 429 / 5xx 最多试 3 次。接口不是官方的，付费或仅自己可见的正文可能拿不到。
