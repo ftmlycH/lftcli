@@ -57,8 +57,8 @@ sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 | `likes` | 我喜欢的文章 |
 | `history` | 浏览过的文章 |
 | `tag <tag> [--sort hot\|new\|month]` | 标签检索。`hot` 总热度，`new` 最新，`month` 月榜 |
-| `random <tag> [--count N]` | 从标签随机抽 N 篇，默认 1，最多 5 |
-| `recommend <N>` | 随机推荐 N 篇，1 到 5 |
+| `random <tag> [--count N]` | 随机抽 N 篇，默认 1，最多 5 |
+| `recommend <N>` | 推荐 N 篇，1 到 5 |
 | `post <id 或链接>` | 读正文。`--markdown` 才带轻量标记 |
 | `clear` / `cls` | 清屏 |
 

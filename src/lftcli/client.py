@@ -35,8 +35,9 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 12
 MAX_PICKS = 5
-# 随机最多扫这么多页；页内凑够篇数就停，控制请求次数。
-RANDOM_PAGES = 6
+# 随机/推荐先用 search_tag 拉够小说再抽样，池子越大越随机。
+SAMPLE_POOL = 48
+RECOMMEND_PER_TAG = 12
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -423,127 +424,37 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
+        """用 search_tag 拉满小说池，再随机抽恰好 count 篇。"""
         _check_picks(count)
-        return self._draw(tag, sort, count, rng or random)
+        rng = rng or random
+        pool_size = max(SAMPLE_POOL, count)
+        pool = self.search_tag(tag, sort=sort, limit=pool_size, offset=0, max_pages=25)
+        return _sample_exact(pool, count, rng, f"标签「{tag.strip()}」里文字小说不足 {count} 篇。")
 
     def recommend(self, count: int, rng=None) -> list[Post]:
+        """多标签各拉一批小说进池，再随机抽恰好 count 篇。"""
         _check_picks(count)
         rng = rng or random
         liked = self.get_favorite_tags()
         hot = self.get_hot_tags()
-        posts: list[Post] = []
+        pool: list[Post] = []
         seen: set[str] = set()
-        working: list[str] = []
+        need_pool = max(SAMPLE_POOL, count * 6)
         for tag in recommend_tag_candidates(liked, hot, rng):
-            if len(posts) >= count:
+            if len(pool) >= need_pool:
                 break
             try:
-                picked = self._draw(tag, "hot", 1, rng)
+                batch = self.search_tag(tag, sort="hot", limit=RECOMMEND_PER_TAG, offset=0, max_pages=4)
             except ApiError:
                 continue
-            if not picked:
-                continue
-            post = picked[0]
-            if post.post_id in seen:
-                continue
-            seen.add(post.post_id)
-            posts.append(post)
-            working.append(tag)
-        # 每个标签一篇仍不够时，从已出过文的标签再抽。
-        for tag in working:
-            if len(posts) >= count:
-                break
-            need = count - len(posts)
-            try:
-                more = self._draw(tag, "hot", need, rng)
-            except ApiError:
-                continue
-            for post in more:
+            for post in batch:
                 if post.post_id in seen:
                     continue
                 seen.add(post.post_id)
-                posts.append(post)
-                if len(posts) >= count:
-                    break
-        return posts[:count]
-
-    def _draw(self, tag: str, sort: str, count: int, rng) -> list[Post]:
-        """在标签页里随机取样，尽量凑满 count；页数有上限。"""
-        api_sort = SORT_TO_API.get(sort)
-        if api_sort is None:
-            raise ApiError("排序只能是 hot、new 或 month。")
-        name = tag.strip()
-        if not name:
-            raise ApiError("标签不能为空。")
-        pages = list(range(RANDOM_PAGES))
-        rng.shuffle(pages)
-        pool: list[Post] = []
-        seen: set[str] = set()
-        # 池子至少到 count*3，随机更稳；凑满或页扫完就停。
-        want = max(count * 3, count)
-        empty_streak = 0
-        saw_zero = False
-
-        def absorb(page: int) -> int:
-            nonlocal empty_streak, saw_zero
-            if page == 0:
-                saw_zero = True
-            rows = self._tag_page(name, api_sort, page * TAG_PAGE_SIZE)
-            added = 0
-            for post in rows:
-                if post.post_type != NOVEL_TYPE or post.post_id in seen:
-                    continue
-                seen.add(post.post_id)
                 pool.append(post)
-                added += 1
-            if not rows:
-                empty_streak += 1
-            else:
-                empty_streak = 0
-            return added
-
-        for page in pages:
-            absorb(page)
-            if len(pool) >= want:
+            if len(pool) >= need_pool:
                 break
-            # 连续空页：有货就停；没货也至少再确认过第 0 页。
-            if empty_streak >= 2 and (len(pool) >= count or saw_zero):
-                break
-        if len(pool) < count and not saw_zero:
-            absorb(0)
-        if not pool:
-            return []
-        if len(pool) <= count:
-            rng.shuffle(pool)
-            return pool
-        return rng.sample(pool, count)
-
-    def _tag_page(self, tag: str, api_sort: str, offset: int) -> list[Post]:
-        payload = self._request(
-            "POST",
-            URL_TAG_POSTS,
-            params={
-                "product": PRODUCT,
-                "method": "newTagSearch",
-                "offset": str(offset),
-                "limit": str(TAG_PAGE_SIZE),
-                "firstpermalink": "null",
-                "tag": tag,
-                "type": api_sort,
-            },
-            content=b"null",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        rows = _expect_response(payload).get("items") or []
-        if not isinstance(rows, list):
-            return []
-        posts: list[Post] = []
-        for row in rows:
-            try:
-                posts.append(_to_post(row, with_html=False))
-            except ApiError:
-                continue
-        return posts
+        return _sample_exact(pool, count, rng, f"暂时凑不够 {count} 篇推荐，请稍后再试。")
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
@@ -1306,6 +1217,15 @@ def _as_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _sample_exact(pool: list[Post], count: int, rng, empty_message: str) -> list[Post]:
+    if len(pool) < count:
+        raise ApiError(empty_message)
+    if len(pool) == count:
+        rng.shuffle(pool)
+        return list(pool)
+    return rng.sample(pool, count)
 
 
 def _check_picks(count: int) -> None:
