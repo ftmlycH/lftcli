@@ -35,10 +35,10 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 20
 MAX_PICKS = 5
-# random / recommend：用 search_tag 拉固定 20 篇再纯随机抽。
+# random / recommend：按标签结果总数整除 20 分组，随机一组再组内抽。
 SAMPLE_POOL = 20
-SAMPLE_START_MAX = 20
-SAMPLE_PAGES = 8
+# 平台标签列表大约只能翻到前 1000 条。
+TAG_RESULT_CAP = 1000
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -432,12 +432,12 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """search_tag 拉 20 篇窗口，窗口内纯随机抽；空窗则退回从头 20 篇。"""
+        """查标签规模 → 整除 20 得组数 → 随机一组 → 组内纯随机抽。"""
         _check_picks(count)
         return self._sample_from_tag(tag, count, sort, rng or random)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """换标签用同一套 20 篇窗口抽样，直到抽出结果。"""
+        """喜欢标签 + 兜底标签，沿用分组随机；有结果就停。"""
         _check_picks(count)
         rng = rng or random
         liked = _unique_tags(self.get_favorite_tags())
@@ -452,25 +452,64 @@ class LofterClient:
                 continue
             if posts:
                 return posts
-        # 兜底：热门标签从 0 再硬拉一次，尽量不空。
-        for name in FALLBACK_HOT_TAGS:
-            try:
-                pool = self.search_tag(name, sort="hot", limit=SAMPLE_POOL, offset=0, max_pages=SAMPLE_PAGES)
-            except ApiError:
-                continue
-            picked = _pick(pool, count, rng)
-            if picked:
-                return picked
         return []
 
     def _sample_from_tag(self, tag: str, count: int, sort: str, rng) -> list[Post]:
-        start = rng.randrange(SAMPLE_START_MAX + 1)
-        pool = self.search_tag(tag, sort=sort, limit=SAMPLE_POOL, offset=start, max_pages=SAMPLE_PAGES)
-        if len(pool) < count and start != 0:
-            pool = self.search_tag(tag, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=SAMPLE_PAGES)
-        elif not pool and start != 0:
-            pool = self.search_tag(tag, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=SAMPLE_PAGES)
+        api_sort = SORT_TO_API.get(sort)
+        if api_sort is None:
+            raise ApiError("排序只能是 hot、new 或 month。")
+        name = tag.strip()
+        if not name:
+            raise ApiError("标签不能为空。")
+
+        # 先取第 0 组：既估规模，又作空组兜底，通常 1～2 次请求。
+        page0, data = self._tag_group(name, api_sort, 0)
+        if not page0:
+            return []
+
+        groups = _tag_group_count(data)
+        group = 0 if groups <= 1 else rng.randrange(groups)
+        if group == 0:
+            pool = page0
+        else:
+            pool, _ = self._tag_group(name, api_sort, group)
+            # 越界空组 / 图多小说少：退回第 0 组，避免没结果。
+            if len(pool) < count:
+                pool = page0
+        if not pool:
+            pool = page0
         return _pick(pool, count, rng)
+
+    def _tag_group(self, tag: str, api_sort: str, group: int) -> tuple[list[Post], dict]:
+        """一次请求取第 group 组（API offset = group * 20），只留文字小说。"""
+        offset = max(0, group) * SAMPLE_POOL
+        payload = self._request(
+            "POST",
+            URL_TAG_POSTS,
+            params={
+                "product": PRODUCT,
+                "method": "newTagSearch",
+                "offset": str(offset),
+                "limit": str(SAMPLE_POOL),
+                "firstpermalink": "null",
+                "tag": tag,
+                "type": api_sort,
+            },
+            content=b"null",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        data = _expect_response(payload)
+        rows = data.get("items") or []
+        posts: list[Post] = []
+        if isinstance(rows, list):
+            for row in rows:
+                try:
+                    post = _to_post(row, with_html=False)
+                except ApiError:
+                    continue
+                if post.post_type == NOVEL_TYPE:
+                    posts.append(post)
+        return posts, data if isinstance(data, dict) else {}
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
@@ -1236,6 +1275,34 @@ def _as_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _tag_total_from_response(data: dict) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    for key in ("count", "total", "postCount", "tagPostCount", "archivesCount", "archives"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            value = value.get("count") or value.get("total") or value.get("postCount")
+        number = _as_int(value)
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def _tag_group_count(data: dict) -> int:
+    """由总数整除 20 得组数；没有总数时用平台上限或下一页游标估计。"""
+    total = _tag_total_from_response(data)
+    if total is not None:
+        usable = min(total, TAG_RESULT_CAP)
+        if usable < SAMPLE_POOL:
+            return 1
+        return max(1, usable // SAMPLE_POOL)
+    nxt = _as_int(data.get("offset"))
+    if nxt is None or nxt <= 0:
+        return 1
+    # 还能翻页：按平台可见上限整除 20；至少 2 组（当前已见第 0 组）。
+    return max(2, TAG_RESULT_CAP // SAMPLE_POOL)
 
 
 def _pick(pool: list[Post], count: int, rng) -> list[Post]:
