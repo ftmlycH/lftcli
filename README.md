@@ -62,8 +62,6 @@ sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
 | `post <id 或链接>` | 读正文。`--markdown` 才带轻量标记 |
 | `clear` / `cls` | 清屏 |
 
-列表一行一篇：`[文章ID] 标题 · 作者 · 热度 123`。`post` 数字 ID 只能打开列表里出现过的文章，对应关系记在 `~/.lofter-cli/posts.json`。有链接时直接把链接传给 `post`。
-
 ## 说明
 
 地址和参数只在 `src/lftcli/client.py`。超时 15 秒，相邻请求至少间隔 0.3 秒，连接失败、超时和 HTTP 429 / 5xx 最多试 3 次。接口不是官方的，付费或仅自己可见的正文可能拿不到。不支持图片。
