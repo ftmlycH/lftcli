@@ -342,25 +342,23 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].author, "作者")
         self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
 
-    def test_random_skips_images_then_samples(self):
+    def test_random_skips_images_on_same_page(self):
         pages = {"n": 0}
 
-        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+        def handler(_request: client.HTTPRequest) -> client.HTTPResponse:
             pages["n"] += 1
-            if pages["n"] <= 2:
-                image = _item(post_id=pages["n"], title="图")
-                image["post"]["type"] = 2
-                items = [image] * 10
-                nxt = pages["n"] * 20
-            else:
-                items = [_item(post_id=100 + i, title=f"小说{i}") for i in range(20)]
-                nxt = -1
+            image = _item(post_id=1, title="图")
+            image["post"]["type"] = 2
+            items = [image] + [_item(post_id=100 + i, title=f"小说{i}") for i in range(10)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": nxt, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
             )
 
         class Rng:
+            def randrange(self, n):
+                return 0
+
             def shuffle(self, items):
                 return None
 
@@ -370,24 +368,25 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("millsage", 2, rng=Rng())
         self.assertEqual(len(posts), 2)
-        self.assertGreaterEqual(pages["n"], 3)
+        self.assertEqual(pages["n"], 1)
+        self.assertTrue(all(post.post_id != "1" for post in posts))
 
-    def test_random_falls_back_to_new_when_hot_empty(self):
-        seen = {"types": []}
+    def test_random_falls_back_to_start_when_window_empty(self):
+        seen = {"offsets": []}
 
         def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            kind = request.url.params.get("type", "")
-            seen["types"].append(kind)
-            if kind == "total":
-                items = []
-            else:
-                items = [_item(post_id=20 + i, title=f"新{i}") for i in range(8)]
+            off = int(request.url.params.get("offset") or "0")
+            seen["offsets"].append(off)
+            items = [] if off != 0 else [_item(post_id=20 + i, title=f"文{i}") for i in range(8)]
             return client.HTTPResponse(
                 200,
                 json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1, "items": items}},
             )
 
         class Rng:
+            def randrange(self, n):
+                return 5
+
             def shuffle(self, items):
                 return None
 
@@ -397,7 +396,35 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("冷门", 2, sort="hot", rng=Rng())
         self.assertEqual(len(posts), 2)
-        self.assertIn("new", seen["types"])
+        self.assertEqual(seen["offsets"][0], 5 * client.TAG_CURSOR_STEP)
+        self.assertIn(0, seen["offsets"])
+
+    def test_random_starts_at_random_api_cursor(self):
+        seen = {"offsets": []}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            seen["offsets"].append(request.url.params.get("offset"))
+            off = int(request.url.params.get("offset") or "0")
+            items = [_item(post_id=off + i + 1, title=f"文{i}") for i in range(12)]
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": off + 12, "items": items}},
+            )
+
+        class Rng:
+            def randrange(self, n):
+                return 7
+
+            def shuffle(self, items):
+                return None
+
+            def sample(self, population, count):
+                return list(population)[:count]
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.sample_tag("millsage", 2, rng=Rng())
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(seen["offsets"][0], str(7 * client.TAG_CURSOR_STEP))
 
     def test_tag_offset_keeps_scanning_for_more_novels(self):
         pages = {"n": 0}
@@ -413,35 +440,67 @@ class ClientTests(unittest.TestCase):
             )
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.search_tag("millsage", limit=5, offset=5)
+            posts = api.search_tag("millsage", limit=5, offset=5, max_pages=20)
         self.assertEqual(len(posts), 5)
         self.assertEqual([post.post_id for post in posts], ["6", "7", "8", "9", "10"])
         self.assertGreaterEqual(pages["n"], 10)
 
-    def test_recommend_samples_from_liked_tag_pool(self):
-        calls = {"tags": [], "explore": 0}
+    def test_recommend_samples_from_cached_liked_tag(self):
+        calls = {"tags": [], "account": 0}
+        original = config.CONFIG_PATH
+        config.CONFIG_PATH = Path(tempfile.gettempdir()) / "lofter-cli-recommend-test.json"
+        try:
+            if config.CONFIG_PATH.exists():
+                config.CONFIG_PATH.unlink()
+            config.save_favorite_tags(["乙"])
 
-        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            url = request.url.full
-            if "usercounts" in url:
+            def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+                url = request.url.full
+                if "usercounts" in url:
+                    calls["account"] += 1
+                    return client.HTTPResponse(200, json={"meta": {"status": 200, "msg": ""}, "response": {}})
+                tag = request.url.params.get("tag", "")
+                calls["tags"].append(tag)
+                items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(20)]
                 return client.HTTPResponse(
                     200,
-                    json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "乙"}]}},
+                    json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
                 )
-            if "exploreRecom" in url:
-                calls["explore"] += 1
-                return client.HTTPResponse(200, json={"code": 200, "data": {"list": []}})
-            tag = request.url.params.get("tag", "")
-            calls["tags"].append(tag)
-            items = [_item(post_id=100 + i, title=f"乙{i}") for i in range(20)]
+
+            class Rng:
+                def randrange(self, n):
+                    return 0
+
+                def shuffle(self, items):
+                    return None
+
+                def sample(self, population, count):
+                    return list(population)[:count]
+
+            with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+                posts = api.recommend(3, rng=Rng())
+            self.assertEqual(len(posts), 3)
+            self.assertEqual(calls["tags"][0], "乙")
+            self.assertEqual(calls["account"], 0)
+        finally:
+            if config.CONFIG_PATH.exists():
+                config.CONFIG_PATH.unlink()
+            config.CONFIG_PATH = original
+
+    def test_recommend_one_network_call(self):
+        calls = {"n": 0}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            calls["n"] += 1
+            items = [_item(post_id=10 + i, title=f"文{i}") for i in range(12)]
             return client.HTTPResponse(
                 200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 20, "items": items}},
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
             )
 
         class Rng:
-            def shuffle(self, items):
-                return None
+            def randrange(self, n):
+                return 0
 
             def sample(self, population, count):
                 return list(population)[:count]
@@ -449,73 +508,51 @@ class ClientTests(unittest.TestCase):
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.recommend(3, rng=Rng())
         self.assertEqual(len(posts), 3)
-        self.assertEqual(calls["tags"][0], "乙")
-        self.assertEqual(calls["explore"], 0)
-
-    def test_recommend_switches_tag_when_first_is_empty(self):
-        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            url = request.url.full
-            if "usercounts" in url:
-                return client.HTTPResponse(
-                    200,
-                    json={"meta": {"status": 200, "msg": ""}, "response": {"manageTags": [{"tagName": "甲"}]}},
-                )
-            tag = request.url.params.get("tag", "")
-            if tag == "甲":
-                items = []
-            else:
-                items = [_item(post_id=10 + abs(hash(tag)) % 50 + i, title=f"{tag}{i}") for i in range(20)]
-            return client.HTTPResponse(
-                200,
-                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": -1 if not items else 20, "items": items}},
-            )
-
-        class Rng:
-            def shuffle(self, items):
-                return None
-
-            def sample(self, population, count):
-                return list(population)[:count]
-
-        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            posts = api.recommend(3, rng=Rng())
-        self.assertEqual(len(posts), 3)
+        self.assertEqual(calls["n"], 1)
 
     def test_history_offset_keeps_paging_when_page_shorter_than_cap(self):
         calls = {"offsets": []}
+        original = config.CONFIG_PATH
+        config.CONFIG_PATH = Path(tempfile.gettempdir()) / "lofter-cli-history-test.json"
+        try:
+            if config.CONFIG_PATH.exists():
+                config.CONFIG_PATH.unlink()
 
-        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
-            url = request.url.full
-            if "usercounts" in url:
+            def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+                url = request.url.full
+                if "usercounts" in url:
+                    return client.HTTPResponse(
+                        200,
+                        json={
+                            "meta": {"status": 200, "msg": ""},
+                            "response": {
+                                "blogs": [{"blogInfo": {"homePageUrl": "https://me.lofter.com", "blogNickName": "我"}}]
+                            },
+                        },
+                    )
+                offset = int(request.url.params.get("offset", "0"))
+                calls["offsets"].append(offset)
+                items = [_item(post_id=offset + i, title=f"史{offset + i}") for i in range(20)]
                 return client.HTTPResponse(
                     200,
                     json={
                         "meta": {"status": 200, "msg": ""},
-                        "response": {
-                            "blogs": [{"blogInfo": {"homePageUrl": "https://me.lofter.com", "blogNickName": "我"}}]
-                        },
+                        "response": {"offset": offset + 20, "count": 100, "items": items},
                     },
                 )
-            offset = int(request.url.params.get("offset", "0"))
-            calls["offsets"].append(offset)
-            items = [_item(post_id=offset + i, title=f"史{offset + i}") for i in range(20)]
-            return client.HTTPResponse(
-                200,
-                json={
-                    "meta": {"status": 200, "msg": ""},
-                    "response": {"offset": offset + 20, "count": 100, "items": items},
-                },
-            )
 
-        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
-            page0 = api.get_history(limit=10, offset=0)
-            page1 = api.get_history(limit=10, offset=10)
-            page2 = api.get_history(limit=10, offset=20)
-        self.assertEqual([post.post_id for post in page0], [str(i) for i in range(10)])
-        self.assertEqual([post.post_id for post in page1], [str(i) for i in range(10, 20)])
-        self.assertEqual([post.post_id for post in page2], [str(i) for i in range(20, 30)])
-        self.assertIn(0, calls["offsets"])
-        self.assertIn(20, calls["offsets"])
+            with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+                page0 = api.get_history(limit=10, offset=0)
+                page1 = api.get_history(limit=10, offset=10)
+                page2 = api.get_history(limit=10, offset=20)
+            self.assertEqual([post.post_id for post in page0], [str(i) for i in range(10)])
+            self.assertEqual([post.post_id for post in page1], [str(i) for i in range(10, 20)])
+            self.assertEqual([post.post_id for post in page2], [str(i) for i in range(20, 30)])
+            self.assertEqual(calls["offsets"], [0, 10, 20])
+        finally:
+            if config.CONFIG_PATH.exists():
+                config.CONFIG_PATH.unlink()
+            config.CONFIG_PATH = original
 
     def test_take_novels_continues_when_batch_shorter_than_page_cap(self):
         calls = {"n": 0}

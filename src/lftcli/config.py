@@ -49,6 +49,8 @@ def save_cookie(cookie: str) -> str:
     _reject_header_unsafe(value)
     data = _read_config()
     data["cookie"] = value
+    data.pop("blog_domain", None)
+    data.pop("favorite_tags", None)
     _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     if os.name != "nt":
         try:
@@ -60,11 +62,51 @@ def save_cookie(cookie: str) -> str:
 
 def clear_cookie() -> bool:
     data = _read_config()
-    if "cookie" not in data:
+    changed = False
+    for key in ("cookie", "blog_domain", "favorite_tags"):
+        if key in data:
+            del data[key]
+            changed = True
+    if not changed:
         return False
-    del data["cookie"]
     _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     return True
+
+
+def load_blog_domain() -> str | None:
+    data = _read_config()
+    value = data.get("blog_domain") if isinstance(data, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def save_blog_domain(domain: str) -> None:
+    text = str(domain or "").strip()
+    if not text:
+        return
+    data = _read_config()
+    if data.get("blog_domain") == text:
+        return
+    data["blog_domain"] = text
+    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_favorite_tags() -> list[str]:
+    data = _read_config()
+    value = data.get("favorite_tags") if isinstance(data, dict) else None
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def save_favorite_tags(tags: list[str]) -> None:
+    cleaned = [str(tag).strip() for tag in tags if str(tag).strip()]
+    data = _read_config()
+    if data.get("favorite_tags") == cleaned:
+        return
+    data["favorite_tags"] = cleaned
+    _atomic_write(CONFIG_PATH, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def cookie_status_lines() -> list[str]:

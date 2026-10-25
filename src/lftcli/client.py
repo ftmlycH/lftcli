@@ -34,21 +34,26 @@ FALLBACK_HOT_TAGS = (
     "三角初华", "三角初音", "鸣潮", "崩坏3", "第五人格", "王者荣耀", "赛马娘", "lovelive", "少女与战车",
 )
 TAG_PAGE_SIZE = 20
+# 标签接口实际常见步长（limit 再大也常返回约 12 条）。
+TAG_CURSOR_STEP = 12
 MAX_PICKS = 5
 SAMPLE_POOL = 12
+# 随机抽样：在前 N 个接口页里用系统熵选起点，且只打 1 页。
+SAMPLE_START_PAGES = 80
 NOVEL_TYPE = 1
 # 标签流里筛小说，避免热门页被图片占满后空翻十几页。
 TAG_POST_TYPES = str(NOVEL_TYPE)
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
 
-TIMEOUT_SECONDS = 10.0
+TIMEOUT_SECONDS = 7.0
+# 单条 CLI 指令总预算，保证慢网下也不拖过约 8 秒。
+COMMAND_BUDGET_SECONDS = 7.5
 MIN_INTERVAL_SECONDS = 0.03
 MAX_ATTEMPTS = 3
 PAGE_CAP = 40
 RETRY_HTTP = {429, 500, 502, 503, 504}
-# 推荐最多试几个标签，避免冷门标签连环空翻。
-RECOMMEND_TAG_TRIES = 6
+_SYSTEM_RNG = random.SystemRandom()
 AUTH_MESSAGE = "Cookie 已失效，请重新从浏览器复制 LOFTER-PHONE-LOGIN-AUTH 或 LOFTER_SESS。"
 _POST_URL = re.compile(
     r"(?:https?://)?(?:[\w.-]+\.)?lofter\.com/post/([0-9a-fA-F]+)_([0-9a-fA-F]+)",
@@ -139,6 +144,7 @@ class LofterClient:
         transport=None,
         min_interval: float = MIN_INTERVAL_SECONDS,
         max_attempts: int = MAX_ATTEMPTS,
+        budget: float | None = COMMAND_BUDGET_SECONDS,
     ) -> None:
         self._cookie = cookie
         self._min_interval = min_interval
@@ -146,6 +152,8 @@ class LofterClient:
         self._last_request = 0.0
         self._headers = _headers(cookie)
         self._transport = transport
+        self._budget = budget
+        self._started = time.monotonic()
 
     def close(self) -> None:
         return None
@@ -155,6 +163,11 @@ class LofterClient:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    def _remaining(self) -> float:
+        if self._budget is None:
+            return TIMEOUT_SECONDS
+        return self._budget - (time.monotonic() - self._started)
 
     def get_collections(self, limit: int = 50, offset: int = 0) -> list[Collection]:
         _check_window(limit, offset)
@@ -213,7 +226,15 @@ class LofterClient:
             "合集文章的返回结构和预期不一致，请只更新 client.py。",
         )
 
-    def search_tag(self, tag: str, sort: str = "hot", limit: int = 20, offset: int = 0, max_pages: int | None = None) -> list[Post]:
+    def search_tag(
+        self,
+        tag: str,
+        sort: str = "hot",
+        limit: int = 20,
+        offset: int = 0,
+        max_pages: int | None = None,
+        start_cursor: int = 0,
+    ) -> list[Post]:
         _check_window(limit, offset, ceiling=300)
         name = tag.strip()
         if not name:
@@ -221,13 +242,15 @@ class LofterClient:
         api_sort = SORT_TO_API.get(sort)
         if api_sort is None:
             raise ApiError("排序只能是 hot、new 或 month。")
+        if start_cursor < 0:
+            raise ApiError("起始游标不能是负数。")
 
         need = offset + limit
-        # 有 postTypes 后通常 1～2 页就够；仍保留足够上限，防接口忽略筛选时短页。
-        pages = max_pages if max_pages is not None else min(40, max(12, need + 8))
+        # 有 postTypes 后通常 1 页就够；默认最多 2 页，守住指令耗时预算。
+        pages = max_pages if max_pages is not None else min(2, max(1, (need + TAG_CURSOR_STEP - 1) // TAG_CURSOR_STEP))
         found: list[Post] = []
         seen: set[str] = set()
-        cursor = 0
+        cursor = start_cursor
         before: int | None = None
         for _ in range(pages):
             if len(found) >= need:
@@ -331,9 +354,16 @@ class LofterClient:
                 raise ApiError("浏览记录的返回结构和预期不一致，请只更新 client.py。")
             return rows, _as_int(data.get("offset")), _as_int(data.get("count"))
 
-        # 历史接口单页常见 20 条；page_cap 对齐，避免误判到头。
+        # 从 offset 起最多翻 1 页，避免历史+域名把总时长拖过预算。
         posts = _map_rows(
-            _take_novels(fetch, limit, offset, page_cap=TAG_PAGE_SIZE),
+            _take_novels(
+                fetch,
+                limit,
+                0,
+                page_cap=max(limit, TAG_PAGE_SIZE),
+                max_pages=1,
+                start_cursor=offset,
+            ),
             lambda row: _to_post(row, with_html=False),
             "浏览记录的返回结构和预期不一致，请只更新 client.py。",
         )
@@ -342,20 +372,27 @@ class LofterClient:
 
     def get_likes(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
-
-        def fetch(cursor: int, kept: int, target: int) -> list[Post]:
-            size = min(40, max((target - kept) * 2, 10))
-            text = self._dwr(
-                URL_LIKES,
-                "MobilePostBean",
-                "getFavTrackItem",
-                [f"number:{size}", f"number:{cursor}"],
-                "https://www.lofter.com/like",
-                "喜欢列表暂时不可用，请稍后再试。",
-            )
-            return _parse_fav_posts(text)
-
-        return _collect(fetch, lambda post: post.post_id, lambda post: post.post_type == NOVEL_TYPE, limit, offset)
+        # 一次 DWR：从 offset 起多取一点再滤小说，避免连环翻页。
+        size = min(40, max((offset + limit) * 2, 10))
+        text = self._dwr(
+            URL_LIKES,
+            "MobilePostBean",
+            "getFavTrackItem",
+            [f"number:{size}", f"number:{offset}"],
+            "https://www.lofter.com/like",
+            "喜欢列表暂时不可用，请稍后再试。",
+        )
+        posts = [post for post in _parse_fav_posts(text) if post.post_type == NOVEL_TYPE]
+        seen: set[str] = set()
+        kept: list[Post] = []
+        for post in posts:
+            if post.post_id in seen:
+                continue
+            seen.add(post.post_id)
+            kept.append(post)
+            if len(kept) >= limit:
+                break
+        return kept
 
     def get_my_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         return self.get_blog_posts(self._blog_domain(), limit, offset)
@@ -420,17 +457,19 @@ class LofterClient:
     def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
         need = offset + limit
-        # 多人各取最新一页：避免图博在 get_blog_posts 里空翻几十页。
-        blog_limit = min(8, max(3, need))
-        per_blog = min(20, max(need, 8))
-        blogs = self.get_following(limit=blog_limit, offset=0)
+        # 关注列表后，在预算内随机试几个博主各一页并凑齐 need。
+        blogs = self.get_following(limit=min(12, max(need, 4)), offset=0)
+        if not blogs:
+            return []
+        order = list(blogs)
+        _SYSTEM_RNG.shuffle(order)
         found: list[Post] = []
         seen: set[str] = set()
-        for blog in blogs:
-            if len(found) >= need:
+        for blog in order[:5]:
+            if len(found) >= need or self._remaining() < 0.5:
                 break
             try:
-                batch = self.get_blog_posts(blog.name, limit=per_blog, offset=0, max_pages=1)
+                batch = self.get_blog_posts(blog.name, limit=max(need, 8), offset=0, max_pages=1)
             except ApiError:
                 continue
             for post in batch:
@@ -443,46 +482,49 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """search_tag 拉一小池小说，再纯随机抽。"""
+        """系统熵选页 + 页内无放回抽样。"""
         _check_picks(count)
-        return self._sample_from_tag(tag, count, sort, rng or random)
+        return self._sample_from_tag(tag, count, sort, rng or _SYSTEM_RNG)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """喜欢的标签优先，再兜底标签；每个标签最多试一次。"""
+        """本地标签池里系统熵选一个标签，再只打一页抽样（不额外拉账号）。"""
         _check_picks(count)
-        rng = rng or random
-        liked = _unique_tags(self.get_favorite_tags())
-        rng.shuffle(liked)
+        rng = rng or _SYSTEM_RNG
+        liked = _unique_tags(config.load_favorite_tags())
         liked_set = set(liked)
         fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in liked_set]
-        rng.shuffle(fallback)
-        for name in (liked + fallback)[:RECOMMEND_TAG_TRIES]:
-            try:
-                posts = self._sample_from_tag(name, count, "hot", rng)
-            except ApiError:
-                continue
-            if posts:
-                return posts
-        return []
+        names = liked + fallback
+        if not names:
+            return []
+        name = names[rng.randrange(len(names))]
+        try:
+            return self._sample_from_tag(name, count, "hot", rng)
+        except ApiError:
+            return []
 
     def _sample_from_tag(self, tag: str, count: int, sort: str, rng) -> list[Post]:
-        """只打 search_tag 一到两次：先指定排序，空再试 new。"""
+        """只请求 1 页：系统熵选 API 起点，再从该页无放回抽取。"""
         if sort not in SORT_TO_API:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-        pool_size = max(count, min(SAMPLE_POOL, max(count * 3, count)))
-        pool = self.search_tag(name, sort=sort, limit=pool_size, offset=0, max_pages=4)
-        if len(pool) < count and sort != "new":
-            more = self.search_tag(name, sort="new", limit=pool_size, offset=0, max_pages=4)
-            if len(more) > len(pool):
-                pool = more
+        start = rng.randrange(SAMPLE_START_PAGES) * TAG_CURSOR_STEP
+        pool = self.search_tag(
+            name, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=1, start_cursor=start
+        )
+        if len(pool) < count and start != 0 and self._remaining() > 0.5:
+            pool = self.search_tag(
+                name, sort=sort, limit=SAMPLE_POOL, offset=0, max_pages=1, start_cursor=0
+            )
         return _pick(pool, count, rng)
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
-        return _tags_from_account(payload)
+        tags = _tags_from_account(payload)
+        if tags:
+            config.save_favorite_tags(tags)
+        return tags
 
     def get_hot_tags(self) -> list[str]:
         try:
@@ -506,8 +548,14 @@ class LofterClient:
         return tags or list(FALLBACK_HOT_TAGS)
 
     def _blog_domain(self) -> str:
+        cached = config.load_blog_domain()
+        if cached:
+            return cached
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
         data = _expect_response(payload)
+        tags = _tags_from_account(payload)
+        if tags:
+            config.save_favorite_tags(tags)
         candidates: list[str] = []
         blogs = data.get("blogs") or []
         if isinstance(blogs, list):
@@ -524,6 +572,7 @@ class LofterClient:
         for raw in candidates:
             domain = _domain(raw)
             if domain:
+                config.save_blog_domain(domain)
                 return domain
         raise ApiError("读不到当前账号的博客域名，浏览记录接口需要它。")
 
@@ -557,10 +606,17 @@ class LofterClient:
         if headers:
             merged.update(headers)
         for _attempt in range(self._max_attempts):
+            left = self._remaining()
+            if left < 0.05:
+                raise ApiError("请求超时，请稍后再试。")
             self._pace()
             request = HTTPRequest(method, url, params or {}, data=data, content=content, headers=merged)
+            timeout = min(TIMEOUT_SECONDS, max(0.5, left))
             try:
-                response = self._transport(request) if self._transport else _urllib_send(request)
+                if self._transport:
+                    response = self._transport(request)
+                else:
+                    response = _urllib_send(request, timeout=timeout)
             except (TimeoutError, socket.timeout, urllib.error.URLError):
                 last_error = "网络超时或连接失败，请稍后再试。"
                 continue
@@ -719,7 +775,7 @@ def _header_has_controls(value: str) -> bool:
 _OPENER = urllib.request.build_opener()
 
 
-def _urllib_send(request: HTTPRequest) -> HTTPResponse:
+def _urllib_send(request: HTTPRequest, timeout: float = TIMEOUT_SECONDS) -> HTTPResponse:
     headers = dict(request.headers)
     payload = request.content
     if request.data is not None and payload is None:
@@ -727,7 +783,7 @@ def _urllib_send(request: HTTPRequest) -> HTTPResponse:
         headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
     outgoing = urllib.request.Request(request.url.full, data=payload, headers=headers, method=request.method)
     try:
-        with _OPENER.open(outgoing, timeout=TIMEOUT_SECONDS) as response:
+        with _OPENER.open(outgoing, timeout=timeout) as response:
             return HTTPResponse(response.status, response.read())
     except urllib.error.HTTPError as exc:
         return HTTPResponse(exc.code, exc.read())
@@ -1001,10 +1057,11 @@ def _take_novels(
     page_cap: int = PAGE_CAP,
     max_pages: int | None = None,
     max_empty_novel_pages: int | None = None,
+    start_cursor: int = 0,
 ) -> list:
     kept: list = []
     seen: set[str] = set()
-    cursor = 0
+    cursor = start_cursor
     target = skip + limit
     empty_novel_pages = 0
     page_budget = 60 if max_pages is None else max(1, max_pages)
