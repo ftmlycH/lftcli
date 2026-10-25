@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import random
 import re
@@ -399,31 +400,106 @@ class LofterClient:
 
         return _collect(fetch, lambda blog: blog.blog_id, lambda _blog: True, limit, offset)
 
+    def get_following_posts(self, limit: int = 20, offset: int = 0) -> list[Post]:
+        _check_window(limit, offset)
+        blogs = self.get_following(limit=min(100, max(limit + offset, 20)), offset=0)
+        found: list[Post] = []
+        seen: set[str] = set()
+        for blog in blogs:
+            try:
+                batch = self.get_blog_posts(blog.name, limit=3, offset=0)
+            except ApiError:
+                continue
+            for post in batch:
+                if post.post_id in seen:
+                    continue
+                seen.add(post.post_id)
+                found.append(post)
+            if len(found) >= offset + limit:
+                break
+        return found[offset : offset + limit]
+
+    def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
+        if count < 1 or count > 20:
+            raise ApiError("篇数需要在 1 到 20 之间。")
+        return self._random_novels(tag, sort, count, rng or random)
+
     def recommend(self, count: int) -> list[Post]:
         if count < 1 or count > 15:
             raise ApiError("篇数需要在 1 到 15 之间。")
         liked = self.get_favorite_tags()
         hot = self.get_hot_tags()
         tags = select_recommend_tags(count, liked, hot, random)
-        spare = [tag for tag in _unique_tags(hot) if tag not in tags]
+        spare = [tag for tag in _unique_tags(hot) if tag not in set(tags)]
+        random.shuffle(spare)
         posts: list[Post] = []
         seen: set[str] = set()
         queue = list(tags)
-        attempts = 0
-        while queue and len(posts) < count and attempts < count + len(spare) + 3:
-            attempts += 1
+        steps = 0
+        while queue and len(posts) < count and steps < count + len(spare) + 1:
+            steps += 1
             tag = queue.pop(0)
             try:
-                pool = [post for post in self.search_tag(tag, "hot", limit=6, max_pages=3) if post.post_id not in seen]
+                picked = self._random_novels(tag, "hot", 1)
             except ApiError:
-                pool = []
-            if not pool:
+                picked = []
+            if not picked:
                 if spare:
-                    queue.append(spare.pop(0))
+                    queue.append(spare.pop())
                 continue
-            pick = random.choice(pool)
-            seen.add(pick.post_id)
-            posts.append(pick)
+            post = picked[0]
+            if post.post_id in seen:
+                continue
+            seen.add(post.post_id)
+            posts.append(post)
+        return posts
+
+    def _random_novels(self, tag: str, sort: str, count: int, rng=None) -> list[Post]:
+        """从标签里随机抽一页，再在这一页里抽，不从热度列表开头按顺序取。"""
+        rng = rng or random
+        api_sort = SORT_TO_API.get(sort)
+        if api_sort is None:
+            raise ApiError("排序只能是 hot、new 或 month。")
+        name = tag.strip()
+        if not name:
+            raise ApiError("标签不能为空。")
+        start = rng.randrange(8) * TAG_PAGE_SIZE
+        offsets = (start,) if start == 0 else (start, 0)
+        for offset in offsets:
+            novels = [post for post in self._tag_page(name, api_sort, offset) if post.post_type == NOVEL_TYPE]
+            if not novels:
+                continue
+            if len(novels) <= count:
+                rng.shuffle(novels)
+                return novels
+            return rng.sample(novels, count)
+        return []
+
+    def _tag_page(self, tag: str, api_sort: str, offset: int) -> list[Post]:
+        payload = self._request(
+            "POST",
+            URL_TAG_POSTS,
+            params={
+                "product": PRODUCT,
+                "method": "newTagSearch",
+                "offset": str(offset),
+                "limit": str(TAG_PAGE_SIZE),
+                "firstpermalink": "null",
+                "tag": tag,
+                "type": api_sort,
+            },
+            content=b"null",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        rows = _expect_response(payload).get("items") or []
+        if not isinstance(rows, list):
+            return []
+        posts: list[Post] = []
+        for row in rows:
+            try:
+                posts.append(_to_post(row, with_html=False))
+            except ApiError:
+                continue
         return posts
 
     def get_favorite_tags(self) -> list[str]:
@@ -589,6 +665,14 @@ def get_blog_posts(cookie: str, blog: str, limit: int = 20, offset: int = 0) -> 
 
 def get_following(cookie: str, limit: int = 20, offset: int = 0) -> list[Blog]:
     return _run(cookie, "get_following", limit, offset)
+
+
+def get_following_posts(cookie: str, limit: int = 20, offset: int = 0) -> list[Post]:
+    return _run(cookie, "get_following_posts", limit, offset)
+
+
+def sample_tag(cookie: str, tag: str, count: int = 1, sort: str = "hot") -> list[Post]:
+    return _run(cookie, "sample_tag", tag, count, sort)
 
 
 def recommend(cookie: str, count: int) -> list[Post]:
@@ -786,7 +870,24 @@ def _parse_following(text: str) -> list[Blog]:
 
 
 def _dwr_unescape(value: str) -> str:
-    return value.replace(r"\/", "/").replace(r"\"", '"').replace(r"\\", "\\")
+    return _decode_escapes(value)
+
+
+def _decode_escapes(value: str) -> str:
+    def replace(match: re.Match) -> str:
+        token = match.group(0)
+        if token.startswith("\\u"):
+            return chr(int(token[2:], 16))
+        return {"\\n": "\n", "\\r": "\r", "\\t": "\t", '\\"': '"', "\\/": "/", "\\\\": "\\"}.get(token, token[1:])
+
+    return re.sub(r"\\u[0-9a-fA-F]{4}|\\.", replace, value)
+
+
+def _article_html(raw: str) -> str:
+    text = _decode_escapes(raw)
+    if "&lt;" in text:
+        text = html.unescape(text)
+    return text
 
 
 def _unique_tags(values) -> list[str]:
@@ -987,15 +1088,18 @@ def _to_post(row: dict, *, with_html: bool = True) -> Post:
     blog_id = source.get("blogId")
     if blog_id is None:
         blog_id = source.get("blogid") or ""
+    if blog_id in ("", "0", 0):
+        blog_id = _blog_id_from_permalink(str(source.get("permalink") or source.get("blogPageUrl") or ""))
     counts = source.get("postCount") if isinstance(source.get("postCount"), dict) else {}
     hot = _as_int(source.get("hot"))
     if hot is None:
         hot = _as_int(counts.get("postHot"))
     if hot is None or hot < 0:
         hot = 0
-    content = source.get("content") if with_html else ""
-    if not isinstance(content, str):
-        content = ""
+    content = ""
+    if with_html:
+        raw = source.get("content") or source.get("caption") or ""
+        content = _article_html(raw if isinstance(raw, str) else "")
     return Post(
         post_id=str(post_id),
         blog_id=str(blog_id),
@@ -1077,11 +1181,18 @@ def _resolve_post(raw: str) -> tuple[str, str]:
         found = config.lookup_post(text)
         if not found:
             raise ApiError(
-                "这个数字 ID 还不在本地目录里。先用 tag、collection、likes 或 history 列出它，"
+                "这个数字 ID 还不在本地目录里。先用 tag、collections、likes、following 或 history 列出它，"
                 "或者直接传入文章链接（…/post/博客ID_文章ID）。"
             )
         return str(found["blog_id"]), text
     raise ApiError("无法识别的文章。请传文章链接，或列表里出现过的数字 ID。")
+
+
+def _blog_id_from_permalink(raw: str) -> str:
+    match = _POST_URL.search(raw) or _PERMALINK.fullmatch(raw.strip())
+    if not match:
+        return ""
+    return str(int(match.group(1), 16))
 
 
 def _collection_key(raw: str) -> str:

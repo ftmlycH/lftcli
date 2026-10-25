@@ -19,16 +19,6 @@ def print_post_list(posts) -> None:
         print(f"[{post.post_id}] {title} · {author} · 热度 {hot}")
 
 
-def print_blog_list(blogs) -> None:
-    if not blogs:
-        print("（没有结果）")
-        return
-    for blog in blogs:
-        name = _single_line(getattr(blog, "name", "") or "")
-        nickname = _single_line(getattr(blog, "nickname", "") or "未知")
-        print(f"[{name}] {nickname}")
-
-
 def print_collection_list(collections) -> None:
     if not collections:
         print("（没有结果）")

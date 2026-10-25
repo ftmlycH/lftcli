@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
-import random
 import shlex
 import sys
 
@@ -53,7 +52,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  lofter> mine\n"
             "  lofter> following\n"
             "  lofter> recommend 3\n"
-            "  lofter> blog 博客名\n"
+            "  lofter> collections 5333228\n"
             "  lofter> tag 原创小说 --sort hot --limit 5\n"
             "  lofter> post 123456\n"
             "  lofter> clear\n"
@@ -76,26 +75,19 @@ def _build_parser() -> argparse.ArgumentParser:
         screen = commands.add_parser(name, help="清空屏幕")
         screen.set_defaults(func=_clear_screen)
 
-    _command(commands, "collections", "订阅的合集，一行一个", _paged(client.get_collections, output.print_collection_list), 50)
-
-    collection = commands.add_parser("collection", help="某个合集里的文章")
-    collection.add_argument("collection_id", help="合集数字 ID，或带 collectionId= 的链接")
-    _add_page_args(collection, limit=20)
-    collection.add_argument(
+    collections = commands.add_parser("collections", help="订阅的合集。写上 ID 就列出里面的文章")
+    collections.add_argument("collection_id", nargs="?", help="合集数字 ID，或带 collectionId= 的链接")
+    _add_page_args(collections, limit=20)
+    collections.add_argument(
         "--order",
         choices=("old", "new"),
         default="old",
-        help="old 从旧到新，new 从新到旧。默认 old，方便接着往下读",
+        help="只在打开某个合集时有效。old 从旧到新，new 从新到旧",
     )
-    collection.set_defaults(func=_collection)
+    collections.set_defaults(func=_collections)
 
     _command(commands, "mine", "我发布的文字", _paged(client.get_my_posts, _show_posts), 20)
-    _command(commands, "following", "我关注的人", _paged(client.get_following, output.print_blog_list), 20)
-
-    blog = commands.add_parser("blog", help="查看某人发布的文字")
-    blog.add_argument("name", help="博客名，或 xxx.lofter.com")
-    _add_page_args(blog, limit=20)
-    blog.set_defaults(func=_blog)
+    _command(commands, "following", "关注的人发布的文字", _paged(client.get_following_posts, _show_posts), 20)
 
     _command(commands, "likes", "我喜欢的文章（红心收藏）", _paged(client.get_likes, _show_posts), 20)
     _command(commands, "history", "账号里浏览过的文章", _paged(client.get_history, _show_posts), 20)
@@ -106,12 +98,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_page_args(tag, limit=20)
     tag.set_defaults(func=_tag)
 
-    random_cmd = commands.add_parser("random", help="从标签结果里随机抽几篇")
+    random_cmd = commands.add_parser("random", help="从标签里随机抽几篇，不按热度从前往后取")
     random_cmd.add_argument("tag", help="标签名")
     random_cmd.add_argument("--sort", choices=("hot", "new", "month"), default="hot")
     random_cmd.add_argument("--count", type=int, default=1, help="抽几篇，默认 1，最多 20")
-    random_cmd.add_argument("--limit", type=int, default=None, help="候选池大小。默认不少于 24，且不少于 --count")
-    random_cmd.add_argument("--offset", type=int, default=0, help="从标签结果的第几条之后开始建候选池")
     random_cmd.set_defaults(func=_random)
 
     recommend_cmd = commands.add_parser("recommend", help="从喜欢的标签和热门标签里随机推荐几篇")
@@ -248,7 +238,11 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def _collection(args, cookie: str) -> None:
+def _collections(args, cookie: str) -> None:
+    if not args.collection_id:
+        rows = client.get_collections(cookie, limit=args.limit, offset=args.offset)
+        output.print_collection_list(rows)
+        return
     posts = client.get_collection_posts(
         cookie,
         args.collection_id,
@@ -257,10 +251,6 @@ def _collection(args, cookie: str) -> None:
         order=args.order,
     )
     _show_posts(posts)
-
-
-def _blog(args, cookie: str) -> None:
-    _show_posts(client.get_blog_posts(cookie, args.name, limit=args.limit, offset=args.offset))
 
 
 def _tag(args, cookie: str) -> None:
@@ -273,25 +263,7 @@ def _recommend(args, cookie: str) -> None:
 
 
 def _random(args, cookie: str) -> None:
-    if args.count < 1 or args.count > 20:
-        raise client.ApiError("--count 需要在 1 到 20 之间。")
-    if args.offset < 0:
-        raise client.ApiError("--offset 不能是负数。")
-    pool = args.limit if args.limit is not None else min(60, max(args.count, 24))
-    if args.limit is not None and args.limit < args.count:
-        raise client.ApiError("--limit 是候选池大小，不能小于 --count。")
-    posts = client.search_tag(
-        cookie,
-        args.tag,
-        sort=args.sort,
-        limit=pool,
-        offset=args.offset,
-    )
-    if not posts:
-        output.print_post_list([])
-        return
-    picked = posts if len(posts) <= args.count else random.sample(posts, args.count)
-    _show_posts(picked)
+    _show_posts(client.sample_tag(cookie, args.tag, args.count, args.sort))
 
 
 def _post(args, cookie: str) -> None:

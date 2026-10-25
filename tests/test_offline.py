@@ -308,6 +308,45 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(posts[0].hot, 8)
         self.assertNotIn("138", posts[0].title)
 
+    def test_dwr_unicode_escapes_become_chinese(self):
+        text = (
+            "s1.id=10;s1.blogId=20;s1.type=1;"
+            r's1.title="\u6807\u9898";'
+            "s1.blogInfo=s2;"
+            r's2.blogNickName="\u4f5c\u8005";'
+            "dwr.engine._remoteHandleCallback('1','0',[s1]);"
+        )
+        posts = client._parse_fav_posts(text)
+        self.assertEqual(posts[0].title, "标题")
+        self.assertEqual(posts[0].author, "作者")
+        self.assertEqual(html_to_text(client._article_html("&lt;p&gt;正文&lt;/p&gt;")), "正文")
+
+    def test_random_page_does_not_start_at_the_first_hot_page(self):
+        seen = {}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            seen["offset"] = request.url.params["offset"]
+            items = [_item(post_id=i + 24, title=f"标题{i}") for i in range(12)]
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 36, "items": items}},
+            )
+
+        class Rng:
+            def randrange(self, _stop):
+                return 2
+
+            def shuffle(self, _items):
+                return None
+
+            def sample(self, population, count):
+                return list(population)[:count]
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.sample_tag("原创小说", 1, rng=Rng())
+        self.assertEqual(seen["offset"], "24")
+        self.assertEqual(posts[0].post_id, "24")
+
     def test_following_parser_ignores_extra_fields(self):
         text = (
             's0.blogName="alpha";\n'

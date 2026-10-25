@@ -132,15 +132,13 @@ cookie
 cookie set [--no-check]
 cookie check
 cookie clear
-collections [--limit] [--offset]
-collection <id> [--limit] [--offset] [--order old|new]
+collections [id] [--limit] [--offset] [--order old|new]
 mine [--limit] [--offset]
 following [--limit] [--offset]
-blog <name> [--limit] [--offset]
 likes [--limit] [--offset]
 history [--limit] [--offset]
 tag <tag> [--sort hot|new|month] [--limit] [--offset]
-random <tag> [--sort hot|new|month] [--count N] [--limit] [--offset]
+random <tag> [--sort hot|new|month] [--count N]
 recommend <count>
 post <id-or-url> [--markdown]
 clear
@@ -149,16 +147,14 @@ clear
 | 命令 | 作用 |
 | --- | --- |
 | `cookie` | 查看、保存或删除本机 Cookie |
-| `collections` | 当前账号订阅的合集 |
-| `collection` | 合集里的文章。默认 `old`，从旧到新 |
+| `collections` | 不带 ID 时列出订阅的合集。带上 ID 就列出里面的文章，默认从旧到新 |
 | `mine` | 我发布的文字 |
-| `following` | 我关注的人。看到名字后用 `blog 名字` 看对方的文字 |
-| `blog` | 某个博客发布的文字 |
+| `following` | 关注的人发布的文字 |
 | `likes` | 我喜欢的文章 |
 | `history` | 账号里浏览过的文章 |
 | `tag` | 标签检索。`hot` 是总热度，`new` 是最新，`month` 是月榜 |
 | `recommend 篇数` | 每个选中的标签随机一篇。先用喜欢的标签，不够再用热门标签 |
-| `random` | 先按排序拉一批，再在本地随机抽 N 篇。不额外请求别的接口 |
+| `random` | 在标签里随机跳到一页，再从这一页抽 N 篇。`--count` 最大 20 |
 | `post` | 一篇文章的纯文本。`--markdown` 才带轻量标记 |
 | `clear` / `cls` | 清空屏幕。Windows、macOS、Linux 和 BSD 都会处理 |
 
@@ -189,9 +185,7 @@ Windows 的传统控制台会打开 ANSI 显示，中文和分隔线才能正常
 
 `post 数字ID` 能打开的，是之前在列表里出现过的文章。正文接口需要博客 ID 和文章 ID，列表命令会把这个对应关系记在 `~/.lofter-cli/posts.json`。手里只有链接时，直接把链接传给 `post`。
 
-`random` 的 `--limit` 是候选池大小，不是最终篇数。不写时，候选池至少 24 条，且不少于 `--count`，最多 60 条。`--count` 最大 20。
-
-标签接口每页条数由服务端决定（目前一页 12 条）。`search_tag` 会在内部用 offset 把页拼够，调用方只传 `tag`、`sort`、`limit`、`offset`。
+`random` 和 `recommend` 都会先随机选一页，再从这一页里抽，不会按热度从第一页往后排。标签接口每页条数由服务端决定（目前一页 12 条）。`tag` 仍按 `offset` 把页拼够。
 
 ## 请求约束
 
