@@ -35,9 +35,8 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 12
 MAX_PICKS = 5
-# 随机/推荐先用 search_tag 拉够小说再抽样，池子越大越随机。
-SAMPLE_POOL = 48
-RECOMMEND_PER_TAG = 12
+# 随机池上限：够抽即可，少请求。
+SAMPLE_POOL_CAP = 12
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -424,37 +423,54 @@ class LofterClient:
         return found[offset : offset + limit]
 
     def sample_tag(self, tag: str, count: int = 1, sort: str = "hot", rng=None) -> list[Post]:
-        """用 search_tag 拉满小说池，再随机抽恰好 count 篇。"""
+        """拉一小池小说再随机抽；不够就返回已有的。"""
         _check_picks(count)
         rng = rng or random
-        pool_size = max(SAMPLE_POOL, count)
-        pool = self.search_tag(tag, sort=sort, limit=pool_size, offset=0, max_pages=25)
-        return _sample_exact(pool, count, rng, f"标签「{tag.strip()}」里文字小说不足 {count} 篇。")
+        pool_size = min(SAMPLE_POOL_CAP, max(count * 2, count))
+        pool = self.search_tag(tag, sort=sort, limit=pool_size, offset=0, max_pages=3)
+        return _pick(pool, count, rng)
 
     def recommend(self, count: int, rng=None) -> list[Post]:
-        """多标签各拉一批小说进池，再随机抽恰好 count 篇。"""
+        """按标签补全到 count；够了就停，不够返回已有的。"""
         _check_picks(count)
         rng = rng or random
-        liked = self.get_favorite_tags()
-        hot = self.get_hot_tags()
-        pool: list[Post] = []
+        posts: list[Post] = []
         seen: set[str] = set()
-        need_pool = max(SAMPLE_POOL, count * 6)
-        for tag in recommend_tag_candidates(liked, hot, rng):
-            if len(pool) >= need_pool:
-                break
-            try:
-                batch = self.search_tag(tag, sort="hot", limit=RECOMMEND_PER_TAG, offset=0, max_pages=4)
-            except ApiError:
-                continue
-            for post in batch:
-                if post.post_id in seen:
+
+        def absorb(tags: list[str]) -> None:
+            for tag in tags:
+                if len(posts) >= count:
+                    return
+                need = count - len(posts)
+                try:
+                    batch = self.search_tag(tag, sort="hot", limit=max(need, 3), offset=0, max_pages=2)
+                except ApiError:
                     continue
-                seen.add(post.post_id)
-                pool.append(post)
-            if len(pool) >= need_pool:
-                break
-        return _sample_exact(pool, count, rng, f"暂时凑不够 {count} 篇推荐，请稍后再试。")
+                available = [post for post in batch if post.post_id not in seen]
+                if not available:
+                    continue
+                for post in _pick(available, min(need, len(available)), rng):
+                    seen.add(post.post_id)
+                    posts.append(post)
+
+        liked = _unique_tags(self.get_favorite_tags())
+        rng.shuffle(liked)
+        absorb(liked)
+        if len(posts) >= count:
+            return posts[:count]
+
+        liked_set = set(liked)
+        hot = [tag for tag in _unique_tags(self.get_hot_tags()) if tag not in liked_set]
+        rng.shuffle(hot)
+        absorb(hot)
+        if len(posts) >= count:
+            return posts[:count]
+
+        used = liked_set | set(hot)
+        fallback = [tag for tag in FALLBACK_HOT_TAGS if tag not in used]
+        rng.shuffle(fallback)
+        absorb(fallback)
+        return posts[:count]
 
     def get_favorite_tags(self) -> list[str]:
         payload = self._request("GET", URL_ACCOUNT, params={"product": PRODUCT})
@@ -1219,12 +1235,13 @@ def _as_int(value) -> int | None:
         return None
 
 
-def _sample_exact(pool: list[Post], count: int, rng, empty_message: str) -> list[Post]:
-    if len(pool) < count:
-        raise ApiError(empty_message)
-    if len(pool) == count:
-        rng.shuffle(pool)
-        return list(pool)
+def _pick(pool: list[Post], count: int, rng) -> list[Post]:
+    if count <= 0 or not pool:
+        return []
+    if len(pool) <= count:
+        picked = list(pool)
+        rng.shuffle(picked)
+        return picked
     return rng.sample(pool, count)
 
 
