@@ -98,7 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_page_args(tag, limit=20)
     tag.set_defaults(func=_tag)
 
-    random_cmd = commands.add_parser("random", help="从标签里随机抽几篇，不按热度从前往后取")
+    random_cmd = commands.add_parser("random", help="从标签里随机抽几篇")
     random_cmd.add_argument("tag", help="标签名")
     random_cmd.add_argument("--sort", choices=("hot", "new", "month"), default="hot")
     random_cmd.add_argument("--count", type=int, default=1, help="抽几篇，默认 1，最多 5。每篇来自随机的一页")
