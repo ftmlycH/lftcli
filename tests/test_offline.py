@@ -89,6 +89,23 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("python3-bs4", control_text)
         self.assertNotIn("./usr/share/lftcli/vendor/httpx/__init__.py", data)
 
+    def test_rpm_starts_with_magic_and_contains_files(self):
+        import importlib.util
+
+        script = Path(__file__).resolve().parents[1] / "packaging" / "build_rpm.py"
+        spec = importlib.util.spec_from_file_location("lftcli_build_rpm", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "lftcli_test.rpm"
+            module.build_rpm(target)
+            blob = target.read_bytes()
+        self.assertEqual(blob[:4], b"\xed\xab\xee\xdb")
+        self.assertIn(b"lftcli", blob)
+        self.assertIn(b"/usr/bin/", blob)
+        self.assertIn(b"\x1f\x8b", blob)
+
     def test_cjk_wrap_uses_double_width(self):
         self.assertEqual(output._wrap_line("甲" * 4, 4), ["甲甲", "甲甲"])
         self.assertEqual(output._wrap_line("abcd", 4), ["abcd"])
@@ -333,16 +350,55 @@ class ClientTests(unittest.TestCase):
             )
 
         class Rng:
+            def randrange(self, stop):
+                return 2
+
             def shuffle(self, items):
-                items[:] = [2, 0, 1, 3, 4][: len(items)]
+                return None
 
             def choice(self, population):
                 return population[0]
+
+            def sample(self, population, count):
+                return list(population)[:count]
 
         with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
             posts = api.sample_tag("原创小说", 1, rng=Rng())
         self.assertEqual(seen["offset"], "24")
         self.assertEqual(posts[0].post_id, "24")
+
+    def test_random_falls_back_to_first_page_when_later_page_is_empty(self):
+        offsets = []
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            offset = request.url.params["offset"]
+            offsets.append(offset)
+            if offset == "24":
+                items = []
+            else:
+                items = [_item(post_id=9, title="小说")]
+            return client.HTTPResponse(
+                200,
+                json={"meta": {"status": 200, "msg": ""}, "response": {"offset": 12, "items": items}},
+            )
+
+        class Rng:
+            def randrange(self, stop):
+                return 2
+
+            def shuffle(self, items):
+                return None
+
+            def choice(self, population):
+                return population[0]
+
+            def sample(self, population, count):
+                return list(population)[:count]
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            posts = api.sample_tag("原创小说", 1, rng=Rng())
+        self.assertEqual(offsets, ["24", "0"])
+        self.assertEqual([post.post_id for post in posts], ["9"])
 
     def test_following_parser_ignores_extra_fields(self):
         text = (

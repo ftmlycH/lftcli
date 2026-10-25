@@ -35,7 +35,7 @@ FALLBACK_HOT_TAGS = (
 )
 TAG_PAGE_SIZE = 12
 MAX_PICKS = 5
-RANDOM_PAGES = 5
+RANDOM_PAGES = 3
 NOVEL_TYPE = 1
 SORT_TO_API = {"hot": "total", "new": "new", "month": "month"}
 ORDER_TO_API = {"old": "1", "new": "0"}
@@ -429,12 +429,9 @@ class LofterClient:
         _check_picks(count)
         liked = self.get_favorite_tags()
         hot = self.get_hot_tags()
-        tags = select_recommend_tags(count, liked, hot, random)
-        spare = [tag for tag in _unique_tags(hot) if tag not in set(tags)]
-        random.shuffle(spare)
         posts: list[Post] = []
         seen: set[str] = set()
-        for tag in (list(tags) + spare)[: count + 2]:
+        for tag in select_recommend_tags(count, liked, hot, random):
             if len(posts) >= count:
                 break
             try:
@@ -446,31 +443,36 @@ class LofterClient:
                     continue
                 seen.add(post.post_id)
                 posts.append(post)
-        return posts[:count]
+        return posts
 
     def _draw(self, tag: str, sort: str, count: int, rng) -> list[Post]:
+        """先抽一页，不够或没有小说时再看第 0 页。最多两次请求。"""
         api_sort = SORT_TO_API.get(sort)
         if api_sort is None:
             raise ApiError("排序只能是 hot、new 或 month。")
         name = tag.strip()
         if not name:
             raise ApiError("标签不能为空。")
-        pages = list(range(RANDOM_PAGES))
-        rng.shuffle(pages)
-        posts: list[Post] = []
+        start = rng.randrange(RANDOM_PAGES)
+        pages = [start] if start == 0 else [start, 0]
+        pool: list[Post] = []
         seen: set[str] = set()
-        for page in pages[:count]:
-            novels = [
-                post
-                for post in self._tag_page(name, api_sort, page * TAG_PAGE_SIZE)
-                if post.post_type == NOVEL_TYPE and post.post_id not in seen
-            ]
-            if not novels:
-                continue
-            pick = rng.choice(novels)
-            seen.add(pick.post_id)
-            posts.append(pick)
-        return posts
+        for page in pages:
+            for post in self._tag_page(name, api_sort, page * TAG_PAGE_SIZE):
+                if post.post_type != NOVEL_TYPE or post.post_id in seen:
+                    continue
+                seen.add(post.post_id)
+                pool.append(post)
+            if len(pool) >= count:
+                break
+        if not pool:
+            return []
+        if len(pool) <= count:
+            rng.shuffle(pool)
+            return pool
+        if count == 1:
+            return [rng.choice(pool)]
+        return rng.sample(pool, count)
 
     def _tag_page(self, tag: str, api_sort: str, offset: int) -> list[Post]:
         payload = self._request(

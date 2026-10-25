@@ -17,19 +17,26 @@ cd lftcli
 | --- | --- |
 | Windows | [python.org](https://www.python.org/downloads/windows/)，勾选 Add python.exe to PATH。没有 `python3` 时用 `py -3` |
 | macOS | `brew install python`，或使用系统 / python.org 的 `python3` |
-| Linux | Debian、Ubuntu 见下方安装包。Fedora：`sudo dnf install python3`。Arch：`sudo pacman -S python` |
+| Linux | Debian、Ubuntu 用下方 deb。Fedora、RHEL 用下方 rpm。Arch：`sudo pacman -S python` |
 | FreeBSD、DragonFly | `pkg install python3` |
 | OpenBSD | `pkg_add python3` |
 | NetBSD | `pkgin install python312`，之后用 `python3.12` |
 
-Debian、Ubuntu 不用 apt 装这个包：
+Debian、Ubuntu 不用 apt：
 
 ```bash
 python3 packaging/build_deb.py
 sudo python3 dist/install_deb.py dist/lftcli_0.1.0_all.deb
 ```
 
-BSD 不用这个 `.deb`。
+Fedora、RHEL：
+
+```bash
+python3 packaging/build_rpm.py
+sudo rpm -i --nosignature dist/lftcli-0.1.0-1.noarch.rpm
+```
+
+BSD 不用这两种包。
 
 配置文件：Windows 是 `%USERPROFILE%\.lofter-cli\config.json`，其他系统是 `~/.lofter-cli/config.json`。
 
@@ -52,8 +59,8 @@ BSD 不用这个 `.deb`。
 | `likes` | 我喜欢的文章 |
 | `history` | 浏览过的文章 |
 | `tag <tag> [--sort hot\|new\|month]` | 标签检索。`hot` 总热度，`new` 最新，`month` 月榜 |
-| `random <tag> [--count N]` | 要几篇就随机抽几页，每页一篇。最多 5 篇，只在前 5 页里抽 |
-| `recommend <N>` | 先选标签，再按上面的方式抽。最多 5 篇 |
+| `random <tag> [--count N]` | 随机抽一页，不够再看第 0 页，最多 5 篇 |
+| `recommend <N>` | 先选标签，每个标签同样抽。最多 5 篇 |
 | `post <id 或链接>` | 读正文。`--markdown` 才带轻量标记 |
 | `clear` / `cls` | 清屏 |
 

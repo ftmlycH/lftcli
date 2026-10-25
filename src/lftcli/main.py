@@ -101,11 +101,11 @@ def _build_parser() -> argparse.ArgumentParser:
     random_cmd = commands.add_parser("random", help="从标签里随机抽几篇")
     random_cmd.add_argument("tag", help="标签名")
     random_cmd.add_argument("--sort", choices=("hot", "new", "month"), default="hot")
-    random_cmd.add_argument("--count", type=int, default=1, help="抽几篇，默认 1，最多 5。每篇来自随机的一页")
+    random_cmd.add_argument("--count", type=int, default=1, help="抽几篇，默认 1，最多 5")
     random_cmd.set_defaults(func=_random)
 
     recommend_cmd = commands.add_parser("recommend", help="从喜欢的标签和热门标签里随机推荐几篇")
-    recommend_cmd.add_argument("count", type=int, help="想看几篇，1 到 5。每篇来自随机的一页")
+    recommend_cmd.add_argument("count", type=int, help="想看几篇，1 到 5")
     recommend_cmd.set_defaults(func=_recommend)
 
     post = commands.add_parser("post", help="读一篇文章的纯文本")
