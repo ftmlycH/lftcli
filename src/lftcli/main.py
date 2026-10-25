@@ -124,7 +124,12 @@ def _command(commands, name: str, help_text: str, func, limit: int) -> None:
 
 def _paged(fetch, show):
     def run(args, cookie: str) -> None:
-        show(fetch(cookie, limit=args.limit, offset=args.offset))
+        rows = fetch(cookie, limit=args.limit, offset=args.offset)
+        if getattr(args, "offset", 0) > 0:
+            hint = "（没有更多了）"
+        else:
+            hint = "（这里暂时没有内容）"
+        show(rows, empty_message=hint)
     return run
 
 
@@ -235,9 +240,10 @@ def _stdin_is_tty() -> bool:
 
 
 def _collections(args, cookie: str) -> None:
+    hint = "（没有更多了）" if args.offset > 0 else "（这里暂时没有内容）"
     if not args.collection_id:
         rows = client.get_collections(cookie, limit=args.limit, offset=args.offset)
-        output.print_collection_list(rows)
+        output.print_collection_list(rows, empty_message=hint)
         return
     posts = client.get_collection_posts(
         cookie,
@@ -246,20 +252,24 @@ def _collections(args, cookie: str) -> None:
         offset=args.offset,
         order=args.order,
     )
-    _show_posts(posts)
+    _show_posts(posts, empty_message=hint)
 
 
 def _tag(args, cookie: str) -> None:
     posts = client.search_tag(cookie, args.tag, sort=args.sort, limit=args.limit, offset=args.offset)
-    _show_posts(posts)
+    hint = "（没有更多了）" if args.offset > 0 else "（这里暂时没有内容）"
+    _show_posts(posts, empty_message=hint)
 
 
 def _recommend(args, cookie: str) -> None:
-    _show_posts(client.recommend(cookie, args.count))
+    _show_posts(client.recommend(cookie, args.count), empty_message="（暂时推荐不出来，稍后再试）")
 
 
 def _random(args, cookie: str) -> None:
-    _show_posts(client.sample_tag(cookie, args.tag, args.count, args.sort))
+    _show_posts(
+        client.sample_tag(cookie, args.tag, args.count, args.sort),
+        empty_message="（这个标签暂时抽不到文字小说，换个标签或用 tag 看看）",
+    )
 
 
 def _post(args, cookie: str) -> None:
@@ -272,9 +282,10 @@ def _post(args, cookie: str) -> None:
     _remember(posts=[post])
 
 
-def _show_posts(posts) -> None:
-    output.print_post_list(posts)
-    _remember(posts)
+def _show_posts(posts, empty_message: str = "（没有更多了）") -> None:
+    output.print_post_list(posts, empty_message=empty_message)
+    if posts:
+        _remember(posts)
 
 
 def _remember(posts) -> None:

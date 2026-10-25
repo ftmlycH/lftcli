@@ -332,12 +332,14 @@ class LofterClient:
                 raise ApiError("浏览记录的返回结构和预期不一致，请只更新 client.py。")
             return rows, _as_int(data.get("offset")), _as_int(data.get("count"))
 
+        # 历史接口单页常见 20 条；page_cap 对齐，避免误判到头。
         posts = _map_rows(
-            _take_novels(fetch, limit, offset, page_cap=PAGE_CAP),
+            _take_novels(fetch, limit, offset, page_cap=TAG_PAGE_SIZE),
             lambda row: _to_post(row, with_html=False),
             "浏览记录的返回结构和预期不一致，请只更新 client.py。",
         )
-        return [post for post in posts if post.blog_id and post.blog_id != "0"]
+        # 没有 blog_id 的仍保留，否则翻页时容易被滤成「没有结果」。
+        return [post for post in posts if post.post_id]
 
     def get_likes(self, limit: int = 20, offset: int = 0) -> list[Post]:
         _check_window(limit, offset)
@@ -993,8 +995,10 @@ def _take_pages(fetch, limit: int, offset: int, page_cap: int = PAGE_CAP) -> lis
     rows: list = []
     seen: set[str] = set()
     cursor = offset
-    while len(rows) < limit:
-        size = min(page_cap, limit - len(rows))
+    for _ in range(40):
+        if len(rows) >= limit:
+            break
+        size = min(page_cap, max(limit - len(rows), 1))
         batch, nxt, total = fetch(cursor, size)
         if not batch:
             break
@@ -1011,8 +1015,12 @@ def _take_pages(fetch, limit: int, offset: int, page_cap: int = PAGE_CAP) -> lis
         rows.extend(fresh)
         if isinstance(nxt, int) and nxt > cursor:
             cursor = nxt
-        else:
-            cursor += len(batch)
+            if isinstance(total, int) and cursor >= total:
+                break
+            continue
+        if isinstance(nxt, int) and nxt <= cursor:
+            break
+        cursor += len(batch)
         if isinstance(total, int) and cursor >= total:
             break
         if len(batch) < size:
@@ -1025,7 +1033,7 @@ def _take_novels(fetch, limit: int, skip: int, page_cap: int = PAGE_CAP) -> list
     seen: set[str] = set()
     cursor = 0
     target = skip + limit
-    for _ in range(40):
+    for _ in range(60):
         if len(kept) >= target:
             break
         batch, nxt, total = fetch(cursor, page_cap)
@@ -1044,10 +1052,15 @@ def _take_novels(fetch, limit: int, skip: int, page_cap: int = PAGE_CAP) -> list
             kept.append(row)
         if fresh == 0:
             break
+        # 有明确下一页游标就继续，绝不能因「本页条数 < page_cap」误停。
         if isinstance(nxt, int) and nxt > cursor:
             cursor = nxt
-        else:
-            cursor += len(batch)
+            if isinstance(total, int) and cursor >= total:
+                break
+            continue
+        if isinstance(nxt, int) and nxt <= cursor:
+            break
+        cursor += len(batch)
         if isinstance(total, int) and cursor >= total:
             break
         if len(batch) < page_cap:

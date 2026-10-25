@@ -535,6 +535,56 @@ class ClientTests(unittest.TestCase):
             posts = api.recommend(3, rng=Rng())
         self.assertEqual(len(posts), 3)
 
+    def test_history_offset_keeps_paging_when_page_shorter_than_cap(self):
+        calls = {"offsets": []}
+
+        def handler(request: client.HTTPRequest) -> client.HTTPResponse:
+            url = request.url.full
+            if "usercounts" in url:
+                return client.HTTPResponse(
+                    200,
+                    json={
+                        "meta": {"status": 200, "msg": ""},
+                        "response": {
+                            "blogs": [{"blogInfo": {"homePageUrl": "https://me.lofter.com", "blogNickName": "我"}}]
+                        },
+                    },
+                )
+            offset = int(request.url.params.get("offset", "0"))
+            calls["offsets"].append(offset)
+            items = [_item(post_id=offset + i, title=f"史{offset + i}") for i in range(20)]
+            return client.HTTPResponse(
+                200,
+                json={
+                    "meta": {"status": 200, "msg": ""},
+                    "response": {"offset": offset + 20, "count": 100, "items": items},
+                },
+            )
+
+        with client.LofterClient("cookie", transport=handler, min_interval=0) as api:
+            page0 = api.get_history(limit=10, offset=0)
+            page1 = api.get_history(limit=10, offset=10)
+            page2 = api.get_history(limit=10, offset=20)
+        self.assertEqual([post.post_id for post in page0], [str(i) for i in range(10)])
+        self.assertEqual([post.post_id for post in page1], [str(i) for i in range(10, 20)])
+        self.assertEqual([post.post_id for post in page2], [str(i) for i in range(20, 30)])
+        self.assertIn(0, calls["offsets"])
+        self.assertIn(20, calls["offsets"])
+
+    def test_take_novels_continues_when_batch_shorter_than_page_cap(self):
+        calls = {"n": 0}
+
+        def fetch(cursor: int, size: int):
+            calls["n"] += 1
+            # 故意每次只返回 20 条，小于旧的 page_cap=40。
+            items = [_item(post_id=cursor + i) for i in range(20)]
+            return items, cursor + 20, 100
+
+        rows = client._take_novels(fetch, limit=10, skip=20, page_cap=40)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual([client._to_post(row, with_html=False).post_id for row in rows], [str(i) for i in range(20, 30)])
+        self.assertGreaterEqual(calls["n"], 2)
+
     def test_following_parser_ignores_extra_fields(self):
         text = (
             's0.blogName="alpha";\n'

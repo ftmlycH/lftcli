@@ -8,9 +8,9 @@ import sys
 import unicodedata
 
 
-def print_post_list(posts) -> None:
+def print_post_list(posts, *, empty_message: str = "（没有更多了）") -> None:
     if not posts:
-        print("（没有结果）")
+        print(empty_message)
         return
     for post in posts:
         title = _single_line(getattr(post, "title", "") or "无标题")
@@ -19,9 +19,9 @@ def print_post_list(posts) -> None:
         print(f"[{post.post_id}] {title} · {author} · 热度 {hot}")
 
 
-def print_collection_list(collections) -> None:
+def print_collection_list(collections, *, empty_message: str = "（没有更多了）") -> None:
     if not collections:
-        print("（没有结果）")
+        print(empty_message)
         return
     for item in collections:
         name = _single_line(item.name or "未命名合集")
