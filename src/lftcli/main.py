@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lftcli",
-        description="在终端读 LOFTER 文字小说。直接运行 lftcli 进入 lofter> 。",
+        description="在终端上沉浸阅读lofter上的同人文。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例:\n"
