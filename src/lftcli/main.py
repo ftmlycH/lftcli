@@ -85,7 +85,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _command(commands, "mine", "我发布的文字", _paged(client.get_my_posts, _show_posts), 20)
 
-    following = commands.add_parser("following", help="关注列表；加博主 ID/名列出其小说")
+    following = commands.add_parser("following", help="关注列表")
     following.add_argument("blog", nargs="?", help="博主 ID 或 blogName")
     _add_page_args(following, limit=20)
     following.set_defaults(func=_following)
